@@ -1,0 +1,17 @@
+[package]
+name = "gaincraft-store"
+description = "gaincraft L1 store: accounts, per-account daily telemetry aggregates (no per-person data), signals, triage modifiers, calls to action, health snapshots, on SQLite (WAL)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+rusqlite.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true
