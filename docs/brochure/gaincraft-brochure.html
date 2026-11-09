@@ -1,0 +1,412 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>GainCraft v0.1.0 — Technical Brochure &amp; Operator Handbook</title>
+  <meta name="author" content="Sandra Schipal" />
+  <style>
+    @page { size: A4; margin: 18mm 16mm 18mm 16mm; }
+    * { box-sizing: border-box; }
+    body {
+      font-family: "Segoe UI", -apple-system, BlinkMacSystemFont, Roboto, Helvetica, Arial, sans-serif;
+      color: #0f172a;
+      background: #ffffff;
+      line-height: 1.55;
+      font-size: 10.2pt;
+      margin: 0;
+      padding: 0;
+    }
+    .cover {
+      background: linear-gradient(145deg, #090d16 0%, #0f172a 55%, #0c4a6e 100%);
+      color: #f8fafc;
+      padding: 44px 40px 48px 40px;
+      border-radius: 14px;
+      margin-bottom: 28px;
+      page-break-after: always;
+    }
+    .cover-kicker {
+      display: inline-block;
+      background: rgba(56, 189, 248, 0.18);
+      border: 1px solid #38bdf8;
+      color: #7dd3fc;
+      font-size: 9pt;
+      font-weight: 700;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      padding: 4px 12px;
+      border-radius: 999px;
+      margin-bottom: 18px;
+    }
+    .cover h1 {
+      font-size: 32pt;
+      line-height: 1.1;
+      margin: 0 0 12px 0;
+      color: #ffffff;
+      letter-spacing: -0.02em;
+    }
+    .cover h2 {
+      font-size: 13.5pt;
+      font-weight: 400;
+      color: #bae6fd;
+      margin: 0 0 26px 0;
+    }
+    .cover-grid {
+      display: table;
+      width: 100%;
+      margin-top: 22px;
+      border-collapse: separate;
+      border-spacing: 10px;
+    }
+    .cover-stat {
+      display: table-cell;
+      width: 25%;
+      background: rgba(15, 23, 42, 0.72);
+      border: 1px solid rgba(125, 211, 252, 0.35);
+      border-radius: 10px;
+      padding: 14px;
+      text-align: center;
+    }
+    .cover-stat .num {
+      font-size: 18pt;
+      font-weight: 800;
+      color: #38bdf8;
+      display: block;
+    }
+    .cover-stat .lbl {
+      font-size: 8pt;
+      color: #cbd5e1;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }
+    .cover-footer {
+      margin-top: 28px;
+      padding-top: 14px;
+      border-top: 1px solid rgba(148, 163, 184, 0.3);
+      font-size: 9pt;
+      color: #94a3b8;
+    }
+    h2.section-title {
+      font-size: 15pt;
+      color: #0c4a6e;
+      border-bottom: 2px solid #0284c7;
+      padding-bottom: 5px;
+      margin-top: 24px;
+      margin-bottom: 10px;
+    }
+    h3 {
+      font-size: 11.5pt;
+      color: #0f172a;
+      margin-top: 16px;
+      margin-bottom: 6px;
+    }
+    p { margin: 0 0 9px 0; }
+    ul { margin: 6px 0 12px 0; padding-left: 20px; }
+    li { margin-bottom: 4px; }
+    table.data-table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 12px 0 18px 0;
+      font-size: 9pt;
+    }
+    table.data-table th {
+      background: #0f172a;
+      color: #f8fafc;
+      text-align: left;
+      padding: 6px 8px;
+      font-weight: 700;
+    }
+    table.data-table td {
+      padding: 5px 8px;
+      border-bottom: 1px solid #e2e8f0;
+      vertical-align: top;
+    }
+    table.data-table tr:nth-child(even) td { background: #f8fafc; }
+    code, pre {
+      font-family: "Cascadia Code", "Consolas", "Courier New", monospace;
+      font-size: 8.8pt;
+    }
+    code {
+      background: #e2e8f0;
+      color: #0f172a;
+      padding: 1px 5px;
+      border-radius: 4px;
+    }
+    pre {
+      background: #0f172a;
+      color: #e2e8f0;
+      padding: 11px 14px;
+      border-radius: 8px;
+      white-space: pre-wrap;
+      line-height: 1.45;
+    }
+    .page-break { page-break-before: always; }
+  </style>
+</head>
+<body>
+  <div class="cover">
+    <div class="cover-kicker">ArtCraft Fleet Technical Brochure &middot; Series #25</div>
+    <h1>GainCraft v0.1.0</h1>
+    <h2>Customer health for a small B2B business: usage aggregates per account and day, contract data from contractcraft, unhappy-customer signals from deskcraft, an explainable 0-100 health score, and calls to action (CTAs) that say what to do this week. One SQLite file, one binary that is both CLI and MCP server. Part of the back-office craft suite (replaces Gainsight / ChurnZero / Totango / a &quot;customer health&quot; spreadsheet).</h2>
+
+    <svg viewBox="0 0 760 165" width="100%" height="165" xmlns="http://www.w3.org/2000/svg" style="margin: 10px 0 16px 0;">
+      <rect x="2" y="2" width="756" height="161" rx="12" fill="#0b1322" stroke="#38bdf8" stroke-width="1.5"/>
+      <rect x="24" y="22" width="200" height="120" rx="8" fill="#1e293b" stroke="#67e8f9" stroke-width="1.5"/>
+      <text x="124" y="52" fill="#67e8f9" font-size="13" font-weight="bold" text-anchor="middle">L3: gaincraft-app</text>
+      <text x="124" y="76" fill="#e2e8f0" font-size="10" text-anchor="middle">Native eframe/egui Studio</text>
+      <text x="124" y="98" fill="#94a3b8" font-size="9.5" text-anchor="middle">In-Process Core Dispatch</text>
+      <text x="124" y="118" fill="#34d399" font-size="9.5" text-anchor="middle">Zero HTTP / Port Overhead</text>
+
+      <rect x="280" y="22" width="200" height="120" rx="8" fill="#1e293b" stroke="#38bdf8" stroke-width="1.5"/>
+      <text x="380" y="52" fill="#38bdf8" font-size="13" font-weight="bold" text-anchor="middle">L2: gaincraft-mcp</text>
+      <text x="380" y="76" fill="#e2e8f0" font-size="10" text-anchor="middle">CLI + Stdio MCP 2024-11-05</text>
+      <text x="380" y="98" fill="#94a3b8" font-size="9.5" text-anchor="middle">Human Verbs &amp; Agent Tools</text>
+      <text x="380" y="118" fill="#34d399" font-size="9.5" text-anchor="middle">Deterministic JSON Output</text>
+
+      <rect x="536" y="22" width="200" height="120" rx="8" fill="#0f172a" stroke="#10b981" stroke-width="2"/>
+      <text x="636" y="52" fill="#34d399" font-size="13" font-weight="bold" text-anchor="middle">L1: gaincraft-core</text>
+      <text x="636" y="76" fill="#e2e8f0" font-size="10" text-anchor="middle">Single dispatch() Engine</text>
+      <text x="636" y="98" fill="#fcd34d" font-size="9.5" text-anchor="middle">deny(unwrap/expect/panic)</text>
+      <text x="636" y="118" fill="#94a3b8" font-size="9.5" text-anchor="middle">Pre-Write Backups &amp; Guards</text>
+
+      <line x1="224" y1="82" x2="280" y2="82" stroke="#38bdf8" stroke-width="2"/>
+      <line x1="480" y1="82" x2="536" y2="82" stroke="#10b981" stroke-width="2"/>
+    </svg>
+
+    <div class="cover-grid">
+      <div class="cover-stat">
+        <span class="num">v0.1.0</span>
+        <span class="lbl">Release Version</span>
+      </div>
+      <div class="cover-stat">
+        <span class="num">3 Crates</span>
+        <span class="lbl">Workspace Tiers</span>
+      </div>
+      <div class="cover-stat">
+        <span class="num">3510</span>
+        <span class="lbl">Pure-Rust LOC</span>
+      </div>
+      <div class="cover-stat">
+        <span class="num">6-Gate</span>
+        <span class="lbl">ArtCraft Verified</span>
+      </div>
+    </div>
+
+    <div class="cover-footer">
+      <strong>Repository:</strong> <code>D:\Dev\repos\gaincraft</code> &middot;
+      <strong>Standard:</strong> <code>CRAFT_BROCHURE_STANDARD.md</code> &middot;
+      <strong>Compiled via:</strong> <code>BookCraft v0.5.0</code>
+    </div>
+  </div>
+
+  <p>Customer health for a small B2B business: usage aggregates per account and day, contract data from contractcraft, unhappy-customer signals from deskcraft, an explainable 0-100 health score, and calls to action (CTAs) that say what to do this week. One SQLite file, one binary that is both CLI and MCP server. Part of the back-office craft suite (replaces Gainsight / ChurnZero / Totango / a &quot;customer health&quot; spreadsheet).</p>
+<p>Status: <strong>v0.1.0, Tier 1</strong> (store + CLI + MCP, tested). No desktop window yet. Synthetic demo data only. <strong>No per-person tracking</strong>: gaincraft only stores counts per account and day and refuses import files with user, e-mail, name, login or IP columns.</p>
+<ul>
+<li>How to use it day to day: HELP.md</li>
+<li>What it is for and where it stops: docs/PRD.md</li>
+<li>Every MCP tool: docs/TOOLS.md (generated, checked by a test)</li>
+<li>Changes: CHANGELOG.md</li>
+</ul>
+<h2 class="section-title">What it does</h2>
+<ul>
+<li><strong>Accounts</strong> with key, domain (links mail signals), owner, ARR, seats, contract number, term end, notice date. Found by key, domain or name.</li>
+<li><strong>Telemetry import:</strong> CSV <code>account;date;active_users[;sessions;key_actions]</code> (<code>;</code> or <code>,</code>). Every row is validated and every account resolved before anything is written; re-importing a day replaces it. Per-person columns are refused before a single row is read (ArbVG section 96a, DSGVO data minimisation).</li>
+<li><strong>Health score</strong>, deterministic and shown with its parts:</li>
+</ul>
+<p><code>score = 100 x (0.45 adoption + 0.35 recency + 0.20 sentiment) x modifier</code></p>
+<ul>
+<li>adoption: average active users over 30 days / seats (or / best day in 90 days without seats), capped at 1</li>
+<li>recency: halves every 14 days without activity</li>
+<li>sentiment: 1 minus decayed negative signals (30-day half-life) plus positive ones, over 180 days</li>
+<li>modifier: optional advisory 0.8-1.2 from an LLM or human read, with a reason and an expiry</li>
+<li>bands: green &gt;= 70, yellow &gt;= 40, red below. Weights are configurable and must sum to 1.</li>
+<li><strong>CTAs</strong>, opened once per account, kind and reference: <code>low_health</code>, <code>adoption_drop</code> (last 14 days below 60% of the 14 before), <code>seats_unused</code> (under half the seats), <code>renewal</code> (notice date within 60 days), <code>negative_signal</code> (last 30 days). Resolving needs a note.</li>
+<li><strong>Bus inbox:</strong> <code>contract.executed</code> from contractcraft sets ARR, contract number, term end and notice date (matched by contract number, then counterparty name); <code>signal.negative</code> from deskcraft (and later formcraft) becomes a sentiment signal, matched by mail domain. The same ticket counts once even if it is sent again. Unknown accounts are created and flagged <code>auto_created</code>.</li>
+<li><strong>Deadlines:</strong> notice dates and term ends within N days, so renewals are not missed.</li>
+</ul>
+<h2 class="section-title">Quick start</h2>
+<pre>
+gaincraft demo-seed
+gaincraft health-all
+gaincraft show mockinger.example
+gaincraft cta
+gaincraft deadlines --days 120
+</pre>
+<p>With the other suite apps (same bus, <code>%LOCALAPPDATA%\craft-biz\bus</code> or <code>$CRAFT_BIZ_BUS</code>):</p>
+<pre>
+deskcraft signals --emit
+contractcraft move C-2026-003 executed     # after sealing it
+gaincraft inbox-drain
+</pre>
+<p>Your own data: <code>gaincraft add &quot;Kunde GmbH&quot; --domain kunde.at --seats 12 --arr &quot;14.400,00&quot;</code>, then export daily active users per customer from your product (a SQL <code>GROUP BY customer, day</code>) and <code>gaincraft import usage.csv</code>.</p>
+<p>Database: <code>--db PATH</code>, else <code>$GAINCRAFT_DB</code>, else <code>%LOCALAPPDATA%\gaincraft\gaincraft.db</code>.</p>
+<h2 class="section-title">MCP</h2>
+<pre>
+{ &quot;mcpServers&quot;: { &quot;gaincraft&quot;: { &quot;command&quot;: &quot;D:/Dev/cargo-target/release/gaincraft.exe&quot;, &quot;args&quot;: [&quot;mcp&quot;, &quot;--allow-path&quot;, &quot;D:/Exports/usage&quot;] } } }
+</pre>
+<p>16 tools, all <code>gain_*</code>; see docs/TOOLS.md. An agent can read an account and set an advisory triage modifier with a reason; it cannot move the score outside 0.8-1.2 of the deterministic value. Agent actions are recorded with actor <code>agent</code>. Without <code>--allow-path</code> the server cannot read any file.</p>
+<h2 class="section-title">Build</h2>
+<pre>
+just ci           # clippy -D warnings, tests (incl. docs/TOOLS.md sync), fmt check
+just docs         # regenerate docs/TOOLS.md after changing a tool
+just build-release
+</pre>
+<p>Needs <code>../craft-biz</code> checked out next to this repo.</p>
+<h2 class="section-title">Not done (honest list)</h2>
+<p>See the &quot;Gaps&quot; section of docs/PRD.md. In short: no window, no connectors to product databases (CSV only), the weights are a sensible default and not fitted to churn data, no NPS or survey intake until formcraft exists.</p>
+
+  <div class="page-break"></div><h2 class="section-title">Product Requirements &amp; Architecture Specification</h2><h2 class="section-title">What it is</h2>
+<p>A customer-health tool for small B2B businesses (5-200 customers): one place that combines how much each customer uses the product, what their contract says, and whether they are unhappy, turns that into a score you can explain in one sentence, and lists what to do about it. Local, one SQLite file, CLI + MCP. Replaces Gainsight, ChurnZero, Totango and the health spreadsheet nobody updates.</p>
+<h2 class="section-title">Users</h2>
+<ul>
+<li>The owner or account manager of a small software or service business who is responsible for renewals.</li>
+<li>An agent (via MCP) that drains events, recomputes health and reads tickets to propose a triage modifier.</li>
+</ul>
+<h2 class="section-title">Jobs</h2>
+<p>1. Know which customers are drifting away before the notice date passes.</p>
+<p>2. See why a score is what it is (adoption, recency, sentiment, modifier), not just a traffic light.</p>
+<p>3. Get a short, deduplicated list of things to do, and record what was done.</p>
+<p>4. Pull in contract dates and support mood from the other craft apps without retyping.</p>
+<p>5. Do all of this without building per-employee surveillance of the customer&#39;s staff.</p>
+<h2 class="section-title">Today (v0.1.0)</h2>
+<ul>
+<li>Accounts with ARR, seats, contract number, term end, notice date; lookup by key, domain or name.</li>
+<li>Aggregate telemetry import (CSV), all-or-nothing, idempotent per day, refuses per-person columns.</li>
+<li>Deterministic health score with configurable weights, stored snapshots, explainable components.</li>
+<li>Advisory triage modifier (0.8-1.2, reason, expiry), enforced in Rust and by a SQLite CHECK.</li>
+<li>Five CTA rules, opened once per account/kind/reference, resolution needs a note.</li>
+<li>Bus inbox: <code>contract.executed</code> (contractcraft) and <code>signal.negative</code> (deskcraft, formcraft later); one signal per source document; unknown accounts created and flagged.</li>
+<li>Deadlines view for notice dates and term ends.</li>
+<li>16 MCP tools, CLI with tables and a health breakdown, demo seed matching the contractcraft and deskcraft demos.</li>
+<li>22 tests; live chain verified with the real binaries: deskcraft signal -&gt; gaincraft sentiment; contractcraft seal + execute -&gt; gaincraft ARR, contract, notice date.</li>
+</ul>
+<h2 class="section-title">Boundaries</h2>
+<ul>
+<li>No per-person data, ever. Aggregates per account and day only. This is a design decision (ArbVG section 96a, DSGVO), not a missing feature.</li>
+<li>No outbound messages. gaincraft says who to call; it does not send campaigns.</li>
+<li>No ML churn prediction. The score is a transparent formula; an LLM may only nudge it within 0.8-1.2 with a written reason.</li>
+<li>No CRM pipeline or invoicing; contracts live in contractcraft, invoices in buchcraft.</li>
+</ul>
+<h2 class="section-title">Gaps (honest)</h2>
+<ul>
+<li>No desktop window (Tier 2).</li>
+<li>CSV only: no direct connection to a product database or analytics tool.</li>
+<li>The default weights (0.45 / 0.35 / 0.20) and the 14-day and 30-day half-lives are reasoned defaults, not fitted to anyone&#39;s churn history.</li>
+<li><code>seats_unused</code> and <code>adoption_drop</code> are simple thresholds; seasonal businesses will see false alarms (dismiss with a note).</li>
+<li>No NPS or survey intake yet; formcraft will send <code>signal.negative</code> (and later positive) responses.</li>
+<li>Contract changes after execution (amendments, terminations) are not sent by contractcraft yet, so ARR and dates can go stale; edit with <code>update</code>.</li>
+<li>A CTA that is resolved stays closed even if the same condition persists (by design, to avoid nagging); a new reference reopens.</li>
+</ul>
+<h2 class="section-title">Next</h2>
+<p>1. formcraft: survey responses as signals (negative and positive).</p>
+<p>2. contractcraft: <code>contract.terminated</code> / <code>contract.amended</code> events.</p>
+<p>3. Tier 2 window: account list with sparkline trend, CTA board.</p>
+<p>4. Optional backtest: given past churned accounts, report how the score ranked them before they left (to tune weights honestly).</p>
+
+  <div class="page-break"></div><h2 class="section-title">Complete MCP Tool &amp; CLI Verb Reference</h2><p>Generated by <code>gaincraft tools --markdown</code>. Do not edit by hand: a test fails when this file</p>
+<p>is out of date. Every tool is also a CLI verb (<code>gaincraft --help</code>). Dotted names (<code>app.verb</code>) are accepted.</p>
+<table class="data-table"><thead><tr>
+<th>Tool</th>
+<th>What it does</th>
+<th>Required</th>
+<th>Optional</th>
+</tr></thead><tbody>
+<tr>
+<td><code>gain_status</code></td>
+<td>Active accounts, ARR, telemetry days, open CTAs, signals in the last 90 days, health weights.</td>
+<td>-</td>
+<td><code>as_of</code></td>
+</tr>
+<tr>
+<td><code>gain_account_add</code></td>
+<td>Add a customer account. Domain links signals from deskcraft (mail domain).</td>
+<td><code>name</code></td>
+<td><code>arr</code>, <code>domain</code>, <code>key</code>, <code>notes</code>, <code>owner</code>, <code>seats</code></td>
+</tr>
+<tr>
+<td><code>gain_account_list</code></td>
+<td>Accounts with ARR, seats, contract dates.</td>
+<td>-</td>
+<td><code>include_inactive</code></td>
+</tr>
+<tr>
+<td><code>gain_account_show</code></td>
+<td>One account with current health and components, score trend, signals, open CTAs and triage.</td>
+<td><code>account</code></td>
+<td><code>as_of</code></td>
+</tr>
+<tr>
+<td><code>gain_account_update</code></td>
+<td>Change account fields; null clears. active=false retires an account.</td>
+<td><code>account</code></td>
+<td><code>active</code>, <code>arr</code>, <code>contract_id</code>, <code>domain</code>, <code>last_notice</code>, <code>name</code>, <code>notes</code>, <code>owner</code>, <code>renewal_months</code>, <code>seats</code>, <code>term_end</code></td>
+</tr>
+<tr>
+<td><code>gain_telemetry_import</code></td>
+<td>Import usage aggregates per account and day: account;date;active_users[;sessions;key_actions]. Per-person columns are refused (ArbVG / DSGVO). Re-importing a day replaces it.</td>
+<td><code>path</code></td>
+<td><code>dry_run</code></td>
+</tr>
+<tr>
+<td><code>gain_signal_add</code></td>
+<td>Record a customer signal by hand (e.g. after a call): negative or positive, score 1-10, with a note.</td>
+<td><code>account</code>, <code>score</code>, <code>note</code></td>
+<td><code>date</code>, <code>polarity</code>, <code>reference</code></td>
+</tr>
+<tr>
+<td><code>gain_health</code></td>
+<td>Health score 0-100 of one account with components (adoption, recency, sentiment, modifier); stores a snapshot and raises CTAs.</td>
+<td><code>account</code></td>
+<td><code>as_of</code></td>
+</tr>
+<tr>
+<td><code>gain_health_all</code></td>
+<td>Health of all active accounts, worst first, ARR at risk (yellow + red); stores snapshots and raises CTAs.</td>
+<td>-</td>
+<td><code>as_of</code></td>
+</tr>
+<tr>
+<td><code>gain_triage_set</code></td>
+<td>Set an advisory modifier (0.8-1.2, with a reason, expires after N days) from an LLM or human read of the account; clear=true removes it.</td>
+<td><code>account</code></td>
+<td><code>clear</code>, <code>days</code>, <code>modifier</code>, <code>reason</code></td>
+</tr>
+<tr>
+<td><code>gain_cta_list</code></td>
+<td>Open calls to action (low health, adoption drop, unused seats, renewal, negative signal), due first.</td>
+<td>-</td>
+<td><code>account</code>, <code>include_closed</code></td>
+</tr>
+<tr>
+<td><code>gain_cta_resolve</code></td>
+<td>Resolve (or dismiss) a CTA with a note saying what was done.</td>
+<td><code>id</code>, <code>note</code></td>
+<td><code>dismiss</code></td>
+</tr>
+<tr>
+<td><code>gain_deadlines</code></td>
+<td>Notice deadlines and term ends of accounts within N days (default 90).</td>
+<td>-</td>
+<td><code>as_of</code>, <code>within_days</code></td>
+</tr>
+<tr>
+<td><code>gain_weights</code></td>
+<td>Show or set the health weights (adoption, recency, sentiment; must sum to 1).</td>
+<td>-</td>
+<td><code>set</code></td>
+</tr>
+<tr>
+<td><code>gain_inbox_drain</code></td>
+<td>Apply events from other craft apps: contractcraft contract.executed (ARR, contract dates) and deskcraft/formcraft signal.negative (sentiment). Unknown accounts are created and flagged.</td>
+<td>-</td>
+<td>-</td>
+</tr>
+<tr>
+<td><code>gain_demo_seed</code></td>
+<td>Fill an EMPTY database with three labelled demo accounts (healthy, dropping, fading) whose names match the other craft demos.</td>
+<td>-</td>
+<td>-</td>
+</tr>
+</tbody></table>
+
+</body>
+</html>
