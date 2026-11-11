@@ -1983,6 +1983,9 @@ impl SuiteApp for GainApp {
     fn status_info(&self) -> String {
         format!("{}  |  {} accounts", self.db, self.rows.len())
     }
+    fn select(&mut self, key: &str) {
+        GainApp::select(self, key);
+    }
     fn smoke_tool(&self) -> &'static str {
         "gain_status"
     }
