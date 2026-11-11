@@ -60,8 +60,14 @@ impl App {
                 let mut map = HashMap::new();
                 for a in arr {
                     let k = a.get("key").and_then(|v| v.as_str()).unwrap_or("");
-                    let score = a.pointer("/health/score").and_then(|v| v.as_i64()).unwrap_or(0);
-                    let band = a.pointer("/health/band").and_then(|v| v.as_str()).unwrap_or("yellow");
+                    let score = a
+                        .pointer("/health/score")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0);
+                    let band = a
+                        .pointer("/health/band")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("yellow");
                     map.insert(k.to_string(), (score, band.to_string()));
                 }
                 self.scores = map;
@@ -114,14 +120,15 @@ impl App {
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        let (green, yellow, red) = self.scores.values().fold((0, 0, 0), |(g, y, r), (_, b)| {
-            match b.as_str() {
-                "green" => (g + 1, y, r),
-                "yellow" => (g, y + 1, r),
-                "red" => (g, y, r + 1),
-                _ => (g, y, r),
-            }
-        });
+        let (green, yellow, red) =
+            self.scores
+                .values()
+                .fold((0, 0, 0), |(g, y, r), (_, b)| match b.as_str() {
+                    "green" => (g + 1, y, r),
+                    "yellow" => (g, y + 1, r),
+                    "red" => (g, y, r + 1),
+                    _ => (g, y, r),
+                });
 
         ui.horizontal(|ui| {
             ui.heading(
@@ -155,7 +162,10 @@ impl eframe::App for App {
 
             ui.separator();
             ui.colored_label(Color32::from_rgb(46, 204, 113), format!("● {green} Green"));
-            ui.colored_label(Color32::from_rgb(241, 196, 15), format!("● {yellow} Yellow"));
+            ui.colored_label(
+                Color32::from_rgb(241, 196, 15),
+                format!("● {yellow} Yellow"),
+            );
             ui.colored_label(Color32::from_rgb(231, 76, 60), format!("● {red} Red"));
 
             ui.separator();
@@ -268,14 +278,8 @@ impl eframe::App for App {
                             });
 
                             ui.horizontal(|ui| {
-                                ui.label(format!(
-                                    "Domain: {}",
-                                    a.domain.as_deref().unwrap_or("-")
-                                ));
-                                ui.label(format!(
-                                    "Owner: {}",
-                                    a.owner.as_deref().unwrap_or("-")
-                                ));
+                                ui.label(format!("Domain: {}", a.domain.as_deref().unwrap_or("-")));
+                                ui.label(format!("Owner: {}", a.owner.as_deref().unwrap_or("-")));
                                 ui.label(format!("Seats: {}", a.seats.unwrap_or(0)));
                                 if let Some(end) = a.term_end {
                                     ui.label(format!("Term End: {end}"));
@@ -291,7 +295,10 @@ impl eframe::App for App {
                                 .max_height(250.0)
                                 .show(ui, |ui| {
                                     if self.selected_account_ctas.is_empty() {
-                                        ui.label(RichText::new("No active CTAs for this account.").italics());
+                                        ui.label(
+                                            RichText::new("No active CTAs for this account.")
+                                                .italics(),
+                                        );
                                     } else {
                                         for cta in &self.selected_account_ctas {
                                             ui.group(|ui| {
@@ -392,7 +399,7 @@ impl eframe::App for App {
                         for a in &self.accounts {
                             if let Some(end) = a.term_end {
                                 let days = (end - today_dt).num_days();
-                                if days >= 0 && days <= 90 {
+                                if (0..=90).contains(&days) {
                                     ui.label(&a.name);
                                     ui.label(format!("{end} ({days}d)"));
                                     ui.label(
@@ -420,7 +427,10 @@ impl eframe::App for App {
                 "Accounts: {} | Active CTAs: {} | Selected: {}",
                 self.accounts.len(),
                 self.ctas.len(),
-                self.selected_account.as_ref().map(|a| a.name.as_str()).unwrap_or("-")
+                self.selected_account
+                    .as_ref()
+                    .map(|a| a.name.as_str())
+                    .unwrap_or("-")
             ));
             ui.separator();
             ui.label(&self.status_msg);
