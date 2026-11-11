@@ -406,7 +406,8 @@ pub fn dispatch(ctx: &mut Ctx, cmd: Command) -> Result<Value, String> {
     }
 }
 
-fn health_of(g: &Gain, a: &Account, as_of: NaiveDate) -> Result<Health, String> {
+/// Compute health without side effects (no snapshot, no CTAs). For views.
+pub fn health_of(g: &Gain, a: &Account, as_of: NaiveDate) -> Result<Health, String> {
     let days = g.days(a.id, as_of - Duration::days(89), as_of).map_err(e)?;
     let last = g.last_active_day(a.id, as_of).map_err(e)?;
     let signals = g

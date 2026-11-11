@@ -10,7 +10,7 @@ then `docs/PRD.md` here.
 - `crates/gaincraft-store` (L1): accounts, telemetry_daily, signals, triage, ctas, snapshots on SQLite WAL.
 - `crates/gaincraft-core` (L1): `Command` bus, `dispatch`, MCP catalog, `health.rs` (score), CTA rules, CSV import, bus inbox, deadlines, demo seed.
 - `crates/gaincraft-mcp` (L2): `gaincraft` binary. CLI verbs map onto the same tool calls as MCP.
-- No L3 (egui) yet.
+- `crates/gaincraft-app` (L3): desktop window on `craft-biz-ui::app::Shell`. Views only call `Frame::run`/`form` (dispatch); reads use the store and `health_of` (no side effects). `COVERAGE` maps every tool to its place; the test fails for a tool without one.
 - Shared kernel: `../craft-biz` (money, dates, bus, MCP loop, tools_markdown, confinement).
 
 ## Invariants (never weaken)

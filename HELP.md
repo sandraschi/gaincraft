@@ -2,6 +2,22 @@
 
 Task-oriented. Every command takes `--json` for machine output and `--db PATH` for another database. `gaincraft <verb> --help` lists all options.
 
+## In the window
+
+Everything below also works in `gaincraft-app`:
+
+| Task | Where |
+|---|---|
+| Who is at risk | Overview: "Needs attention"; Accounts sorted worst first |
+| Why a score is what it is | Accounts: select a row, Customer 360 on the right |
+| Work the calls to action | CTA cockpit: drag a card onto Done, write what was done |
+| Record a call, set triage, edit | Customer 360 buttons |
+| Import usage | Import usage: choose the CSV, check the preview, Dry run, Import |
+| Apply contracts and unhappy mails | Signals (top right): Apply all |
+| Anything else | Ctrl+K: every command with a form |
+
+Keys: Ctrl+K commands, Ctrl+mouse wheel or Ctrl +/- zoom, Ctrl+0 reset zoom, F5 reload, arrows and Ctrl+arrows on the board. Theme, language and zoom are remembered in `ui.json` next to the database.
+
 ## Add a customer
 
 ```powershell

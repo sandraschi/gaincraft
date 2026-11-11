@@ -29,6 +29,8 @@ A customer-health tool for small B2B businesses (5-200 customers): one place tha
 - 16 MCP tools, CLI with tables and a health breakdown, demo seed matching the contractcraft and deskcraft demos.
 - 22 tests; live chain verified with the real binaries: deskcraft signal -> gaincraft sentiment; contractcraft seal + execute -> gaincraft ARR, contract, notice date.
 
+- Desktop window (0.2.0): Overview, Accounts + Customer 360, CTA cockpit board, Renewals timeline, Signals, Import wizard, Settings; on the shared craft-biz-ui frame (high contrast, Ctrl+wheel zoom, Ctrl+K palette for every tool, signals dock).
+
 ## Boundaries
 
 - No per-person data, ever. Aggregates per account and day only. This is a design decision (ArbVG section 96a, DSGVO), not a missing feature.
@@ -38,7 +40,8 @@ A customer-health tool for small B2B businesses (5-200 customers): one place tha
 
 ## Gaps (honest)
 
-- No desktop window (Tier 2).
+- CTA titles are written by the core in English, so the German window shows English titles on the board.
+- The window has no undo for resolved CTAs (by design: a resolution is a record).
 - CSV only: no direct connection to a product database or analytics tool.
 - The default weights (0.45 / 0.35 / 0.20) and the 14-day and 30-day half-lives are reasoned defaults, not fitted to anyone's churn history.
 - `seats_unused` and `adoption_drop` are simple thresholds; seasonal businesses will see false alarms (dismiss with a note).
@@ -50,5 +53,5 @@ A customer-health tool for small B2B businesses (5-200 customers): one place tha
 
 1. formcraft: survey responses as signals (negative and positive).
 2. contractcraft: `contract.terminated` / `contract.amended` events.
-3. Tier 2 window: account list with sparkline trend, CTA board.
+3. Health trend chart over months in the Customer 360 (snapshots exist; today only the sparkline).
 4. Optional backtest: given past churned accounts, report how the score ranked them before they left (to tune weights honestly).

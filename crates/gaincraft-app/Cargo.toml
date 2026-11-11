@@ -1,5 +1,6 @@
 [package]
 name = "gaincraft-app"
+description = "gaincraft L3: desktop window (Overview, Accounts + Customer 360, CTA cockpit board, Renewals, Signals, usage import) on the craft-biz-ui suite frame."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -15,8 +16,12 @@ craft-biz-ui = { workspace = true }
 gaincraft-core = { path = "../gaincraft-core" }
 gaincraft-store = { path = "../gaincraft-store" }
 chrono = { workspace = true }
-clap = { workspace = true }
-eframe = { workspace = true }
 egui = { workspace = true }
-serde = { workspace = true }
 serde_json = { workspace = true }
+rfd = "0.17"
+
+[dev-dependencies]
+egui_kittest = "0.37"
+
+[lints]
+workspace = true

@@ -2,7 +2,7 @@
 
 Customer health for a small B2B business: usage aggregates per account and day, contract data from contractcraft, unhappy-customer signals from deskcraft, an explainable 0-100 health score, and calls to action (CTAs) that say what to do this week. One SQLite file, one binary that is both CLI and MCP server. Part of the back-office craft suite (replaces Gainsight / ChurnZero / Totango / a "customer health" spreadsheet).
 
-Status: **v0.1.0, Tier 1** (store + CLI + MCP, tested). No desktop window yet. Synthetic demo data only. **No per-person tracking**: gaincraft only stores counts per account and day and refuses import files with user, e-mail, name, login or IP columns.
+Status: **v0.2.0, Tier 2** (store + CLI + MCP + desktop window, tested). Synthetic demo data only. **No per-person tracking**: gaincraft only stores counts per account and day and refuses import files with user, e-mail, name, login or IP columns.
 
 - How to use it day to day: [HELP.md](HELP.md)
 - What it is for and where it stops: [docs/PRD.md](docs/PRD.md)
@@ -23,6 +23,26 @@ Status: **v0.1.0, Tier 1** (store + CLI + MCP, tested). No desktop window yet. S
 - **CTAs**, opened once per account, kind and reference: `low_health`, `adoption_drop` (last 14 days below 60% of the 14 before), `seats_unused` (under half the seats), `renewal` (notice date within 60 days), `negative_signal` (last 30 days). Resolving needs a note.
 - **Bus inbox:** `contract.executed` from contractcraft sets ARR, contract number, term end and notice date (matched by contract number, then counterparty name); `signal.negative` from deskcraft (and later formcraft) becomes a sentiment signal, matched by mail domain. The same ticket counts once even if it is sent again. Unknown accounts are created and flagged `auto_created`.
 - **Deadlines:** notice dates and term ends within N days, so renewals are not missed.
+
+## Desktop window
+
+`gaincraft-app` is laid out like a customer success platform:
+
+- **Overview:** ARR, ARR at risk, band distribution, who needs attention, next deadlines.
+- **Accounts** with a **Customer 360** panel: score ring, the three components with their raw values, 90-day usage chart against seats, contract dates, triage, open CTAs, signals.
+- **CTA cockpit:** a board by due date. Drop a card on Done to resolve it with a note; other moves are refused with the reason.
+- **Renewals:** 12-month timeline of notice dates and term ends.
+- **Signals:** feed of the last 180 days, record new ones.
+- **Import usage:** wizard that checks the file for personal columns and unknown accounts before anything is written.
+- **Settings:** health weights, demo data, apply signals.
+
+Every change in the window goes through the same command path as CLI and MCP. Ctrl+K lists every tool with a generated form, and a test fails if a tool has no place in the window. High-contrast light and dark themes, Ctrl+mouse wheel zoom (Ctrl+0 resets), German and English, signals dock for the other craft apps.
+
+```powershell
+gaincraft-app --demo                 # on an empty database: load the demo first
+gaincraft-app --dark --lang en
+gaincraft-app --view 2 --screenshot cockpit.png
+```
 
 ## Quick start
 
@@ -66,4 +86,4 @@ Needs `../craft-biz` checked out next to this repo.
 
 ## Not done (honest list)
 
-See the "Gaps" section of [docs/PRD.md](docs/PRD.md). In short: no window, no connectors to product databases (CSV only), the weights are a sensible default and not fitted to churn data, no NPS or survey intake until formcraft exists.
+See the "Gaps" section of [docs/PRD.md](docs/PRD.md). In short: no connectors to product databases (CSV only), the weights are a sensible default and not fitted to churn data, no NPS or survey intake until formcraft exists.

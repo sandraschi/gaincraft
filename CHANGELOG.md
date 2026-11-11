@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.0 - 2026-11-11
+
+- Desktop window rebuilt on the shared craft-biz-ui frame: Overview, Accounts with Customer 360, CTA cockpit board (drop on Done opens the resolve form), Renewals timeline, Signals, Import wizard with privacy pre-check, Settings with weights. All 16 tools reachable from the window (coverage test), Ctrl+K palette, signals dock with apply and retry, high-contrast light/dark, Ctrl+wheel zoom, DE/EN.
+- The previous window (0.1.x, 2026-11-10) read the store directly and covered 2 of 16 tools; it is replaced.
+- Core: `health_of` is public (health without side effects, for views).
+- 5 window tests with egui_kittest, including a real drag of a CTA card onto Done.
+
 ## 0.1.0 - 2026-11-09
 
 - Tier 1: gaincraft-store (accounts, aggregate telemetry without person columns, signals, triage, CTAs, snapshots; invariants enforced by SQLite CHECKs and unique indexes), gaincraft-core (`health.rs` deterministic score with explainable components, CTA rules, CSV import with personal-column guard, bus inbox for `contract.executed` and `signal.negative`, deadlines, demo seed), `gaincraft` binary (CLI with `--json`, health breakdown and tables, MCP stdio, 16 tools).
