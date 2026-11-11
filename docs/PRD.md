@@ -55,3 +55,21 @@ A customer-health tool for small B2B businesses (5-200 customers): one place tha
 2. contractcraft: `contract.terminated` / `contract.amended` events.
 3. Health trend chart over months in the Customer 360 (snapshots exist; today only the sparkline).
 4. Optional backtest: given past churned accounts, report how the score ranked them before they left (to tune weights honestly).
+
+## UI/UX Architecture & Menu Bar Standard
+
+In accordance with [`CRAFT_MENU_BAR_STANDARD.md`](../../mcp-central-docs/standards/rust-artcraft/CRAFT_MENU_BAR_STANDARD.md):
+- **Pattern 2 (Viewport-Centric Craft Workstation):** Persistent Customer 360 overview stage and CTA cockpit Kanban board with real-time health score gauges. Top quick button row acts as accelerators into the `View` menu. To add a new account perspective or CTA rule:
+  1. Register a visibility toggle in the `View` or `Window` menu.
+  2. Add an entry in the sidebar Accounts / Filter toolbox.
+  3. Wire the action directly into the universal `Command::dispatch` bus.
+- **Top Menu Bar Hierarchy:**
+  - `File`: New Account (`Ctrl+N`), Import Usage CSV (`Ctrl+O`), Open Recent ▸, Save (`Ctrl+S`), Export Health Report / CSV (`Ctrl+E`), Close (`Ctrl+W`), Quit (`Ctrl+Q`).
+  - `Edit`: Undo (`Ctrl+Z`), Redo (`Ctrl+Y`), Cut, Copy, Paste, Select All, Preferences (`Ctrl+,`).
+  - `View`: Customer 360 Cockpit, Accounts Table, CTA Kanban Board, Renewals Timeline, Signals Feed, Theme (`Dark`/`Light`).
+  - `Insert`: Add Account, Add Manual Signal, Create Call-to-Action (CTA), Add Triage Modifier.
+  - `Modify`: Edit Account ARR / Seats, Resolve CTA, Update Health Weights, Recompute Score.
+  - `Commands`: Drain Bus Signals, Recalculate Health Scores, Run CTA Trigger Engine, Audit Churn Risk.
+  - `Window`: Reset Layout, Customer 360 Viewport, CTA Board Drawer, Signals Dock.
+  - `Help` (Mandatory 5-Dialog Suite): `Command Palette...` (`Ctrl+K`), `Keyboard Shortcuts...` (`F1`), `Project Files & Docs...`, `Licenses & Notices...`, `About GainCraft`.
+- **Behavioral Mechanics:** Smooth `switch_on_hover` between top-level menus, zero-unsafe immediate-mode rendering, and headless `--smoke` parity.
