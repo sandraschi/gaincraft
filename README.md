@@ -18,6 +18,7 @@ Status: **v0.3.0, Tier 4** (store + CLI + MCP + desktop window with the Craft me
 
 - **Accounts** with key, domain (links mail signals), owner, ARR, seats, contract number, term end, notice date. Found by key, domain or name.
 - **Telemetry import:** CSV `account;date;active_users[;sessions;key_actions]` (`;` or `,`). Every row is validated and every account resolved before anything is written; re-importing a day replaces it. Per-person columns are refused before a single row is read (ArbVG section 96a, DSGVO data minimisation).
+- **Direct from the product database:** `gain_usage_pull` (CLI `usage-pull`) runs one `SELECT` against a SQLite product database, opened read-only with `query_only`, a 30 s limit and a row cap. The query must return `account, date, active_users[, sessions, key_actions]`; extra or per-person result columns are refused, and the rows go through the same importer as a CSV.
 - **Health score**, deterministic and shown with its parts:
   `score = 100 x (0.45 adoption + 0.35 recency + 0.20 sentiment) x modifier`
   - adoption: average active users over 30 days / seats (or / best day in 90 days without seats), capped at 1
@@ -62,6 +63,7 @@ gaincraft health-all
 gaincraft show mockinger.example
 gaincraft cta
 gaincraft deadlines --days 120
+gaincraft usage-pull --from "D:\Product\app.db" --query "SELECT customer AS account, day AS date, COUNT(DISTINCT user_id) AS active_users FROM events GROUP BY 1,2" --dry-run
 ```
 
 With the other suite apps (same bus, `%LOCALAPPDATA%\craft-biz\bus` or `$CRAFT_BIZ_BUS`):
@@ -72,7 +74,7 @@ contractcraft move C-2026-003 executed     # after sealing it
 gaincraft inbox-drain
 ```
 
-Your own data: `gaincraft add "Kunde GmbH" --domain kunde.at --seats 12 --arr "14.400,00"`, then export daily active users per customer from your product (a SQL `GROUP BY customer, day`) and `gaincraft import usage.csv`.
+Your own data: `gaincraft add "Kunde GmbH" --domain kunde.at --seats 12 --arr "14.400,00"`, then either export daily active users per customer as CSV (`gaincraft import usage.csv`) or let gaincraft read the product database directly (`gaincraft usage-pull`, SELECT only, read-only).
 
 Database: `--db PATH`, else `$GAINCRAFT_DB`, else `%LOCALAPPDATA%\gaincraft\gaincraft.db`.
 
@@ -82,7 +84,7 @@ Database: `--db PATH`, else `$GAINCRAFT_DB`, else `%LOCALAPPDATA%\gaincraft\gain
 { "mcpServers": { "gaincraft": { "command": "D:/Dev/cargo-target/release/gaincraft.exe", "args": ["mcp", "--allow-path", "D:/Exports/usage"] } } }
 ```
 
-20 tools, all `gain_*`; see [docs/TOOLS.md](docs/TOOLS.md). `gain_export` and `gain_backup` write files, so they also need `--allow-path`. An agent can read an account and set an advisory triage modifier with a reason; it cannot move the score outside 0.8-1.2 of the deterministic value. Agent actions are recorded with actor `agent`. Without `--allow-path` the server cannot read any file.
+21 tools, all `gain_*`; see [docs/TOOLS.md](docs/TOOLS.md). `gain_export` and `gain_backup` write files, so they also need `--allow-path`. An agent can read an account and set an advisory triage modifier with a reason; it cannot move the score outside 0.8-1.2 of the deterministic value. Agent actions are recorded with actor `agent`. Without `--allow-path` the server cannot read any file.
 
 ## Build
 
@@ -99,4 +101,4 @@ Needs `../craft-biz` checked out next to this repo. The installer (NSIS, no admi
 
 ## Not done (honest list)
 
-See the "Gaps" section of [docs/PRD.md](docs/PRD.md). In short: no connectors to product databases (CSV only); the weights are a sensible default, and the backtest needs churned accounts with dates before it can say whether they work; undo covers edits made in the window this session, not records; contractcraft and formcraft do not send the new event kinds yet.
+See the "Gaps" section of [docs/PRD.md](docs/PRD.md). In short: the connector reads SQLite only (no PostgreSQL/MySQL driver); the weights are a sensible default, and the backtest needs churned accounts with dates before it can say whether they work; undo covers edits made in the window this session, not records; contractcraft and formcraft do not send the new event kinds yet.

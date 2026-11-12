@@ -52,6 +52,20 @@ gaincraft import D:\Exports\usage.csv
 
 If one account in the file is unknown, nothing is written. Importing the same day again replaces it, so a nightly full export is fine.
 
+## Pull straight from the product database
+
+No export step, no file in between. `usage-pull` opens a SQLite product database **read-only** (`query_only`, 30 s limit, row cap) and runs one `SELECT`:
+
+```powershell
+gaincraft usage-pull --from "D:\Product\app.db" --query "SELECT customer AS account, day AS date, COUNT(DISTINCT user_id) AS active_users, COUNT(*) AS sessions FROM events GROUP BY 1, 2" --dry-run
+gaincraft usage-pull --from "D:\Product\app.db" --query "..."
+```
+
+- The query must be one `SELECT` (or `WITH ... SELECT`) and must return `account`, `date`, `active_users` and optionally `sessions`, `key_actions`.
+- Result columns are checked like a CSV header: `user`, `email`, `name`, `login`, `ip` and any extra column are refused. The aggregation may use `user_id` inside `COUNT(DISTINCT ...)`; only the aggregate leaves the product database.
+- `date` is `YYYY-MM-DD` (or `DD.MM.YYYY`); counts must be whole numbers.
+- Unknown accounts stop the whole pull before anything is written; re-running a day replaces it. `--dry-run` shows the row and account counts without writing.
+
 ## See who is at risk
 
 ```powershell

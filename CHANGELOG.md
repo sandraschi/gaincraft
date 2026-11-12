@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- `gain_usage_pull` (CLI `usage-pull`, `--from` + `--query`): read aggregate usage straight from a SQLite product database. Read-only connection, `query_only`, 30 s interrupt, 1,000,000-row and 20 MB caps, one SELECT/WITH enforced. The result must return `account, date, active_users[, sessions, key_actions]`; extra or per-person columns are refused, unknown accounts stop the pull before writing, and re-running a day replaces it. Rows go through the same importer as a CSV.
+- `source` must be `sqlite`; PostgreSQL/MySQL are not built in and say so.
+- Desktop: Import usage has a "Pull from SQLite" card with a worked query, and File has "Pull Usage from SQLite..."; the coverage test maps the new tool.
+- 21 MCP tools; 52 tests (2 new core tests: read-only aggregation, and refusal of writes, personal columns, missing columns and other sources).
+- `docs/TOOLS.md` regenerated; mcpb manifest updated.
+
 ## 0.3.0 - 2026-11-12
 
 Tier 4: the PRD's menu bar, Help suite and packaging, plus the PRD "Next" items that belong to gaincraft.

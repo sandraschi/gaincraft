@@ -22,6 +22,7 @@ A customer-health tool for small B2B businesses (5-200 customers): one place tha
 
 - Accounts with ARR, seats, contract number, term end, notice date, churn date (`retired_on`); lookup by key, domain or name.
 - Aggregate telemetry import (CSV), all-or-nothing, idempotent per day, refuses per-person columns.
+- Direct usage pull from a SQLite product database (`gain_usage_pull` / `usage-pull`): read-only connection, one SELECT, 30 s limit, row cap, the same result-column privacy guard and importer as the CSV path.
 - Deterministic health score with configurable weights, stored snapshots, explainable components.
 - Advisory triage modifier (0.8-1.2, reason, expiry), enforced in Rust and by a SQLite CHECK.
 - Five CTA rules plus hand-made CTAs (`gain_cta_add`) and termination CTAs from the bus; opened once per account/kind/reference, resolution needs a note. CTAs store the values behind their title, so the window words them in German or English.
@@ -29,7 +30,7 @@ A customer-health tool for small B2B businesses (5-200 customers): one place tha
 - Churn audit (`gain_churn_audit`): accounts at risk now with reasons (band, 30-day drop, notice soon while not green, low sentiment), and a backtest: for each retired account with a churn date, its score and rank `lead_days` before it left, with a verdict that says when the sample is too small to mean anything.
 - Health report export as CSV (`;`, DE numbers) or Markdown; database backup to a new file (`VACUUM INTO`, never overwrites).
 - Deadlines view for notice dates and term ends.
-- 20 MCP tools, every one also a CLI verb (checked by a test), demo seed matching the contractcraft and deskcraft demos.
+- 21 MCP tools, every one also a CLI verb (checked by a test), demo seed matching the contractcraft and deskcraft demos.
 - Desktop window on the shared craft-biz-ui frame: Overview, Accounts + Customer 360 (with a 12-month health trend recomputed from stored data), CTA cockpit board, Renewals timeline, Signals, Import wizard, Settings. High contrast, Ctrl+wheel zoom, DE/EN, signals dock.
 - Craft Menu Bar Standard: `File Edit View Insert Modify Commands Window Help`, switch-on-hover, the five-dialog Help suite, a quick view row, Window toggles for every panel, undo/redo for edits (see below).
 - Schema 2 with an in-place migration from 0.2.0 databases (tested on a real v1 file).
@@ -46,7 +47,8 @@ A customer-health tool for small B2B businesses (5-200 customers): one place tha
 
 - Undo covers edits made in the window during this session (account fields, retire, triage, weights, add account, add CTA). Records are not undoable by design: signals, resolved CTAs, imports, applied bus events. The journal is not persisted across restarts.
 - File > Save folds the SQLite write-ahead log into the database file; every change is already written when it is made, so Save never loses or keeps anything back.
-- CSV only: no direct connection to a product database or analytics tool.
+- The connector reads SQLite only; no PostgreSQL/MySQL driver is built in. For those, export CSV first.
+- The pull trusts the query to aggregate: the schema guard checks the result columns, not the SQL's meaning. A query that projects a person column under an allowed alias cannot be detected.
 - The default weights (0.45 / 0.35 / 0.20) and the 14-day and 30-day half-lives are reasoned defaults, not fitted to anyone's churn history. The backtest needs retired accounts with churn dates before it says anything; with fewer than five it says so.
 - `seats_unused` and `adoption_drop` are simple thresholds; seasonal businesses will see false alarms (dismiss with a note).
 - Senders not built yet: contractcraft does not emit `contract.amended` / `contract.terminated`, and formcraft does not emit `signal.positive`. gaincraft consumes them (tested with synthetic events); until the senders exist, edit with `update` and record praise with `signal --positive`.
