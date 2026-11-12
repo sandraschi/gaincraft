@@ -103,6 +103,25 @@ pub enum Command {
     },
     InboxDrain,
     DemoSeed,
+    CtaAdd {
+        account: String,
+        title: String,
+        due: Option<NaiveDate>,
+        note: Option<String>,
+    },
+    Export {
+        path: String,
+        format: Option<String>,
+        as_of: Option<NaiveDate>,
+        overwrite: bool,
+    },
+    Backup {
+        path: String,
+    },
+    ChurnAudit {
+        as_of: Option<NaiveDate>,
+        lead_days: i64,
+    },
 }
 
 // ---------- argument helpers ----------
@@ -219,6 +238,7 @@ impl Command {
                     })?,
                     active: a.get("active").and_then(Value::as_bool),
                     notes: a.get("notes").and_then(Value::as_str).map(str::to_string),
+                    retired_on: tri(a, "retired_on", |v| str_of(v).and_then(|t| date(&t)))?,
                 },
             },
             "gain_telemetry_import" => Command::TelemetryImport {
@@ -270,6 +290,25 @@ impl Command {
             },
             "gain_inbox_drain" => Command::InboxDrain,
             "gain_demo_seed" => Command::DemoSeed,
+            "gain_cta_add" => Command::CtaAdd {
+                account: s(a, "account")?.into(),
+                title: s(a, "title")?.into(),
+                due: opt_date(a, "due")?,
+                note: opt_s(a, "note"),
+            },
+            "gain_export" => Command::Export {
+                path: s(a, "path")?.into(),
+                format: opt_s(a, "format"),
+                as_of: opt_date(a, "as_of")?,
+                overwrite: flag(a, "overwrite"),
+            },
+            "gain_backup" => Command::Backup {
+                path: s(a, "path")?.into(),
+            },
+            "gain_churn_audit" => Command::ChurnAudit {
+                as_of: opt_date(a, "as_of")?,
+                lead_days: int(a, "lead_days")?.unwrap_or(90).clamp(7, 365),
+            },
             other => return Err(format!("unknown tool {other}")),
         })
     }
@@ -403,7 +442,268 @@ pub fn dispatch(ctx: &mut Ctx, cmd: Command) -> Result<Value, String> {
         }
         Command::InboxDrain => inbox_drain(ctx),
         Command::DemoSeed => demo_seed(&ctx.gain),
+        Command::CtaAdd {
+            account,
+            title,
+            due,
+            note,
+        } => {
+            let a = g.account(&account).map_err(e)?;
+            let reference = g.next_manual_ref().map_err(e)?;
+            let params = json!({ "note": note, "by": actor });
+            g.raise_cta_with(
+                a.id,
+                "manual",
+                &reference,
+                &title,
+                &params.to_string(),
+                due,
+                today(),
+            )
+            .map_err(e)?;
+            let c = g
+                .ctas(Some(a.id), false)
+                .map_err(e)?
+                .into_iter()
+                .find(|c| c.kind == "manual" && c.reference == reference)
+                .ok_or("CTA was not stored")?;
+            to_json(&c)
+        }
+        Command::Export {
+            path,
+            format,
+            as_of,
+            overwrite,
+        } => export(
+            ctx,
+            &path,
+            format.as_deref(),
+            as_of.unwrap_or_else(today),
+            overwrite,
+        ),
+        Command::Backup { path } => {
+            let p = ctx.confinement.check(&path, true)?;
+            let bytes = ctx.gain.backup_to(&p).map_err(e)?;
+            Ok(json!({ "path": p.display().to_string(), "bytes": bytes }))
+        }
+        Command::ChurnAudit { as_of, lead_days } => {
+            churn_audit(g, as_of.unwrap_or_else(today), lead_days)
+        }
     }
+}
+
+/// One row of the health report: account, health now, open CTAs.
+fn report_rows(g: &Gain, as_of: NaiveDate) -> Result<Vec<(Account, Health, usize)>, String> {
+    let mut rows = Vec::new();
+    for a in g.accounts(false).map_err(e)? {
+        let h = health_of(g, &a, as_of)?;
+        let n = g.ctas(Some(a.id), false).map_err(e)?.len();
+        rows.push((a, h, n));
+    }
+    rows.sort_by(|x, y| x.1.score.cmp(&y.1.score).then(x.0.name.cmp(&y.0.name)));
+    Ok(rows)
+}
+
+/// DE decimal for CSV (Excel in AT/DE reads `0,45`).
+fn dec(x: f64) -> String {
+    format!("{x:.2}").replace('.', ",")
+}
+
+fn csv_field(s: &str) -> String {
+    if s.contains([';', '"', '\n', '\r']) {
+        format!("\"{}\"", s.replace('"', "\"\""))
+    } else {
+        s.to_string()
+    }
+}
+
+fn md_cell(s: &str) -> String {
+    s.replace('|', "\\|").replace(['\n', '\r'], " ")
+}
+
+fn de_date(d: Option<NaiveDate>) -> String {
+    d.map(|d| d.format("%d.%m.%Y").to_string())
+        .unwrap_or_default()
+}
+
+/// Health report of all active accounts as CSV (`;`, DE numbers) or Markdown.
+fn export(
+    ctx: &Ctx,
+    path: &str,
+    format: Option<&str>,
+    as_of: NaiveDate,
+    overwrite: bool,
+) -> Result<Value, String> {
+    let fmt = match format.map(str::to_lowercase) {
+        Some(f) => f,
+        None => std::path::Path::new(path)
+            .extension()
+            .and_then(|x| x.to_str())
+            .map(str::to_lowercase)
+            .unwrap_or_else(|| "csv".into()),
+    };
+    if !matches!(fmt.as_str(), "csv" | "md") {
+        return Err(format!("format {fmt:?}: use csv or md"));
+    }
+    let p = ctx.confinement.check(path, true)?;
+    if p.exists() && !overwrite {
+        return Err(format!(
+            "{} exists; pass overwrite=true to replace it",
+            p.display()
+        ));
+    }
+    let g = &ctx.gain;
+    let rows = report_rows(g, as_of)?;
+    let at_risk: i64 = rows
+        .iter()
+        .filter(|r| r.1.band != "green")
+        .map(|r| r.0.arr_cents.unwrap_or(0))
+        .sum();
+    let mut out = String::new();
+    if fmt == "csv" {
+        out.push_str("account;name;owner;score;band;adoption;recency;sentiment;modifier;arr;notice;term_end;open_ctas\n");
+        for (a, h, n) in &rows {
+            let cols = [
+                csv_field(&a.key),
+                csv_field(&a.name),
+                csv_field(a.owner.as_deref().unwrap_or("")),
+                h.score.to_string(),
+                h.band.to_string(),
+                dec(h.adoption),
+                dec(h.recency),
+                dec(h.sentiment),
+                dec(h.modifier),
+                a.arr_cents.map(eur).unwrap_or_default(),
+                de_date(a.last_notice),
+                de_date(a.term_end),
+                n.to_string(),
+            ];
+            out.push_str(&cols.join(";"));
+            out.push('\n');
+        }
+    } else {
+        out.push_str(&format!(
+            "# gaincraft health report\n\nAs of {}. {} active accounts, ARR at risk (yellow + red): {} EUR.\n\nScore = 100 x (adoption, recency, sentiment weighted) x modifier. Weights: {}.\n\n",
+            as_of.format("%d.%m.%Y"),
+            rows.len(),
+            eur(at_risk),
+            serde_json::to_string(&weights(g)?).map_err(|x| x.to_string())?
+        ));
+        out.push_str("| Account | Owner | Score | Band | Adoption | Recency | Sentiment | Modifier | ARR | Notice | Open CTAs |\n|---|---|---:|---|---:|---:|---:|---:|---:|---|---:|\n");
+        for (a, h, n) in &rows {
+            out.push_str(&format!(
+                "| {} | {} | {} | {} | {:.2} | {:.2} | {:.2} | {:.2} | {} | {} | {} |\n",
+                md_cell(&a.name),
+                md_cell(a.owner.as_deref().unwrap_or("")),
+                h.score,
+                h.band,
+                h.adoption,
+                h.recency,
+                h.sentiment,
+                h.modifier,
+                a.arr_cents.map(eur).unwrap_or_default(),
+                de_date(a.last_notice),
+                n
+            ));
+        }
+    }
+    std::fs::write(&p, out).map_err(|x| format!("{}: {x}", p.display()))?;
+    Ok(
+        json!({ "path": p.display().to_string(), "format": fmt, "rows": rows.len(), "as_of": as_of, "arr_at_risk": eur(at_risk) }),
+    )
+}
+
+/// Who is at risk now and why, plus an honest backtest: for every retired
+/// account with a churn date, how did the score rank it `lead_days` before it left?
+pub fn churn_audit(g: &Gain, as_of: NaiveDate, lead_days: i64) -> Result<Value, String> {
+    let all = g.accounts(true).map_err(e)?;
+    let mut risk = Vec::new();
+    for a in all.iter().filter(|a| a.active) {
+        let now = health_of(g, a, as_of)?;
+        let d30 = now.score - health_of(g, a, as_of - Duration::days(30))?.score;
+        let d90 = now.score - health_of(g, a, as_of - Duration::days(90))?.score;
+        let notice_in = a
+            .last_notice
+            .filter(|n| *n >= as_of)
+            .map(|n| (n - as_of).num_days());
+        let mut reasons = Vec::new();
+        if now.band != "green" {
+            reasons.push(format!("band {}", now.band));
+        }
+        if d30 <= -10 {
+            reasons.push(format!("score {d30:+} in 30 days"));
+        }
+        if let Some(d) = notice_in.filter(|d| *d <= 90 && now.band != "green") {
+            reasons.push(format!("notice in {d} days while not green"));
+        }
+        if now.sentiment < 0.6 {
+            reasons.push(format!("sentiment {:.2}", now.sentiment));
+        }
+        risk.push(json!({
+            "account": a.key, "name": a.name, "score": now.score, "band": now.band,
+            "delta_30d": d30, "delta_90d": d90, "notice_in_days": notice_in,
+            "arr": a.arr_cents.map(eur), "arr_cents": a.arr_cents.unwrap_or(0),
+            "at_risk": !reasons.is_empty(), "reasons": reasons,
+        }));
+    }
+    risk.sort_by(|x, y| {
+        y["at_risk"]
+            .as_bool()
+            .cmp(&x["at_risk"].as_bool())
+            .then(x["score"].as_i64().cmp(&y["score"].as_i64()))
+    });
+    let arr_at_risk: i64 = risk
+        .iter()
+        .filter(|r| r["at_risk"] == true)
+        .filter_map(|r| r["arr_cents"].as_i64())
+        .sum();
+
+    let mut backtest = Vec::new();
+    for c in all.iter().filter(|a| !a.active) {
+        let Some(left) = c.retired_on else { continue };
+        let at = left - Duration::days(lead_days);
+        // Accounts alive on `at` that had any usage by then (no data = no fair score).
+        let mut cohort = Vec::new();
+        for a in &all {
+            let alive = a.retired_on.is_none_or(|r| r > at);
+            let seen = g.last_active_day(a.id, at).map_err(e)?.is_some();
+            if a.id == c.id || (alive && seen) {
+                cohort.push((a.id, health_of(g, a, at)?.score));
+            }
+        }
+        cohort.sort_by_key(|x| x.1);
+        let h = health_of(g, c, at)?;
+        let rank = cohort.iter().position(|x| x.0 == c.id).map(|i| i + 1);
+        backtest.push(json!({
+            "account": c.key, "name": c.name, "retired_on": left, "scored_on": at,
+            "score": h.score, "band": h.band, "flagged": h.band != "green",
+            "rank": rank, "of": cohort.len(),
+            "had_usage": g.last_active_day(c.id, at).map_err(e)?.is_some(),
+        }));
+    }
+    let n = backtest.len();
+    let flagged = backtest.iter().filter(|b| b["flagged"] == true).count();
+    let mean_pct = if n == 0 {
+        None
+    } else {
+        let sum: f64 = backtest
+            .iter()
+            .filter_map(|b| Some(b["rank"].as_f64()? / b["of"].as_f64()?.max(1.0)))
+            .sum();
+        Some((sum / n as f64 * 100.0).round() / 100.0)
+    };
+    let verdict = match n {
+        0 => "No retired accounts with a churn date: nothing to backtest. Retire churned accounts with update --retire (optionally --retired-on DATE).".to_string(),
+        1..=4 => format!("{flagged} of {n} churned accounts were yellow or red {lead_days} days before they left. Too few to tune weights: treat as anecdote, not evidence."),
+        _ => format!("{flagged} of {n} churned accounts were yellow or red {lead_days} days before they left; average rank in the bottom {:.0}% of the book.", mean_pct.unwrap_or(1.0) * 100.0),
+    };
+    Ok(json!({
+        "as_of": as_of, "lead_days": lead_days,
+        "at_risk": risk.iter().filter(|r| r["at_risk"] == true).count(),
+        "arr_at_risk": eur(arr_at_risk),
+        "risk": risk,
+        "backtest": { "churned": n, "flagged": flagged, "mean_rank_fraction": mean_pct, "verdict": verdict, "accounts": backtest },
+    }))
 }
 
 /// Compute health without side effects (no snapshot, no CTAs). For views.
@@ -437,13 +737,24 @@ pub fn refresh(g: &Gain, a: &Account, as_of: NaiveDate) -> Result<(Health, Vec<S
     )
     .map_err(e)?;
     let mut opened = Vec::new();
+    // `params` carries the values behind the English title so the window can
+    // word the CTA in the user's language.
     let mut raise = |kind: &str,
                      reference: &str,
                      title: String,
+                     params: Value,
                      due: Option<NaiveDate>|
      -> Result<(), String> {
-        if g.raise_cta(a.id, kind, reference, &title, due, as_of)
-            .map_err(e)?
+        if g.raise_cta_with(
+            a.id,
+            kind,
+            reference,
+            &title,
+            &params.to_string(),
+            due,
+            as_of,
+        )
+        .map_err(e)?
         {
             opened.push(kind.to_string());
         }
@@ -454,28 +765,27 @@ pub fn refresh(g: &Gain, a: &Account, as_of: NaiveDate) -> Result<(Health, Vec<S
             "low_health",
             "",
             format!("Health {} (red): talk to {}", h.score, a.name),
+            json!({ "score": h.score, "name": a.name }),
             Some(as_of + Duration::days(3)),
         )?;
     }
     if let Some(t) = h.trend_14d.filter(|t| *t < 0.6) {
+        let pct = ((1.0 - t) * 100.0).round() as i64;
         raise(
             "adoption_drop",
             "",
-            format!(
-                "Usage down {:.0}% vs. the two weeks before",
-                (1.0 - t) * 100.0
-            ),
+            format!("Usage down {pct}% vs. the two weeks before"),
+            json!({ "pct": pct }),
             Some(as_of + Duration::days(7)),
         )?;
     }
     if let Some(seats) = a.seats.filter(|s| h.avg_active_30d < 0.5 * *s as f64) {
+        let avg = (h.avg_active_30d * 10.0).round() / 10.0;
         raise(
             "seats_unused",
             "",
-            format!(
-                "Only {:.1} of {seats} seats active on average",
-                h.avg_active_30d
-            ),
+            format!("Only {avg:.1} of {seats} seats active on average"),
+            json!({ "avg": avg, "seats": seats }),
             None,
         )?;
     }
@@ -490,6 +800,7 @@ pub fn refresh(g: &Gain, a: &Account, as_of: NaiveDate) -> Result<(Health, Vec<S
                 "Notice deadline {}: secure the renewal",
                 n.format("%d.%m.%Y")
             ),
+            json!({ "date": n.format("%d.%m.%Y").to_string() }),
             Some(n),
         )?;
     }
@@ -510,6 +821,7 @@ pub fn refresh(g: &Gain, a: &Account, as_of: NaiveDate) -> Result<(Health, Vec<S
                 "Unhappy signal from {} ({reference}), score {}",
                 s.source, s.score
             ),
+            json!({ "source": s.source, "reference": reference, "score": s.score }),
             Some(s.at + Duration::days(2)),
         )?;
     }
@@ -694,12 +1006,21 @@ pub fn inbox_drain(ctx: &mut Ctx) -> Result<Value, String> {
     for ev in events {
         let r = match ev.kind.as_str() {
             "contract.executed" => apply_contract(&ctx.gain, &ev.payload),
-            "signal.negative" => apply_signal(
+            "contract.amended" => apply_amendment(&ctx.gain, &ev.payload),
+            "contract.terminated" => {
+                apply_termination(&ctx.gain, &ev.payload, event_date(&ev.created))
+            }
+            "signal.negative" | "signal.positive" => apply_signal(
                 &ctx.gain,
                 &ev.source,
                 &ev.id,
                 &ev.payload,
                 event_date(&ev.created),
+                if ev.kind == "signal.positive" {
+                    "positive"
+                } else {
+                    "negative"
+                },
             ),
             other => Err(format!("gaincraft does not handle event kind {other}")),
         };
@@ -768,12 +1089,118 @@ fn apply_contract(g: &Gain, p: &Value) -> Result<String, String> {
     ))
 }
 
+fn account_by_contract(g: &Gain, contract: &str) -> Result<Option<Account>, String> {
+    Ok(g.accounts(true)
+        .map_err(e)?
+        .into_iter()
+        .find(|a| a.contract_id.as_deref() == Some(contract)))
+}
+
+/// `contract.amended`: only the fields present in the payload change.
+/// An amendment for a contract gaincraft has never seen is rejected (send
+/// `contract.executed` first), so the dock shows it and it can be retried.
+fn apply_amendment(g: &Gain, p: &Value) -> Result<String, String> {
+    let contract = s(p, "contract_id")?;
+    let a = account_by_contract(g, contract)?.ok_or_else(|| {
+        format!("amendment for unknown contract {contract}: apply its contract.executed first")
+    })?;
+    let day = |k: &str| -> Result<Option<Option<NaiveDate>>, String> {
+        match p.get(k) {
+            None => Ok(None),
+            Some(Value::Null) => Ok(Some(None)),
+            Some(v) => str_of(v).and_then(|t| date(&t)).map(|d| Some(Some(d))),
+        }
+    };
+    let patch = AccountPatch {
+        arr_cents: match p.get("annual_value_cents") {
+            None => None,
+            Some(v) => {
+                Some(Some(v.as_i64().filter(|c| *c >= 0).ok_or(
+                    "annual_value_cents must be a non-negative integer",
+                )?))
+            }
+        },
+        term_end: day("term_end")?,
+        last_notice: day("last_notice")?,
+        renewal_months: p.get("renewal_months").map(Value::as_i64),
+        ..Default::default()
+    };
+    let auto = a.auto_created;
+    let u = g.update_account(&a.key, &patch).map_err(e)?;
+    if auto {
+        g.conn()
+            .execute("UPDATE accounts SET auto_created = 1 WHERE id = ?1", [u.id])
+            .map_err(|x| x.to_string())?;
+    }
+    Ok(format!("amended {} ({contract})", u.key))
+}
+
+/// `contract.terminated`: the contract ends on `effective` (or `term_end`).
+/// No renewal deadline any more; open renewal CTAs are dismissed; a
+/// `termination` CTA asks for an exit call. The account stays active until a
+/// person retires it (it is still a customer until the term ends).
+fn apply_termination(g: &Gain, p: &Value, today: NaiveDate) -> Result<String, String> {
+    let contract = s(p, "contract_id")?;
+    let a = account_by_contract(g, contract)?
+        .ok_or_else(|| format!("termination for unknown contract {contract}"))?;
+    let effective = opt_s(p, "effective")
+        .or_else(|| opt_s(p, "term_end"))
+        .map(|d| date(&d))
+        .transpose()?;
+    let reason = opt_s(p, "reason").unwrap_or_default();
+    let u = g
+        .update_account(
+            &a.key,
+            &AccountPatch {
+                term_end: effective.map(Some),
+                last_notice: Some(None),
+                renewal_months: Some(None),
+                ..Default::default()
+            },
+        )
+        .map_err(e)?;
+    for c in g
+        .ctas(Some(a.id), false)
+        .map_err(e)?
+        .iter()
+        .filter(|c| c.kind == "renewal")
+    {
+        g.resolve_cta(
+            c.id,
+            true,
+            &format!("contract {contract} terminated"),
+            "contractcraft",
+        )
+        .map_err(e)?;
+    }
+    let eff = de_date(effective);
+    g.raise_cta_with(
+        a.id,
+        "termination",
+        contract,
+        &format!(
+            "Contract {contract} terminated{}: exit call, retire after the term ends",
+            if eff.is_empty() {
+                String::new()
+            } else {
+                format!(" (effective {eff})")
+            }
+        ),
+        &json!({ "contract": contract, "effective": eff, "reason": reason }).to_string(),
+        Some(today + Duration::days(3)),
+        today,
+    )
+    .map_err(e)?;
+    Ok(format!("terminated {} ({contract})", u.key))
+}
+
 fn apply_signal(
     g: &Gain,
     source: &str,
     event_id: &str,
     p: &Value,
     at: NaiveDate,
+    polarity: &str,
 ) -> Result<String, String> {
     let domain = opt_s(p, "account")
         .or_else(|| opt_s(p, "email").and_then(|m| m.split('@').nth(1).map(str::to_string)))
@@ -813,7 +1240,7 @@ fn apply_signal(
             a.id,
             &NewSignal {
                 source: source.into(),
-                polarity: "negative".into(),
+                polarity: polarity.into(),
                 score,
                 reference,
                 note,
@@ -823,7 +1250,7 @@ fn apply_signal(
         )
         .map_err(e)?;
     Ok(format!(
-        "{} signal on {}{}",
+        "{} {polarity} signal on {}{}",
         if added.is_some() {
             "recorded"
         } else {
@@ -950,7 +1377,7 @@ pub fn tools() -> Vec<Value> {
         tool("gain_account_add", "Add a customer account. Domain links signals from deskcraft (mail domain).", json!({ "name": {"type":"string"}, "key": {"type":"string"}, "domain": {"type":"string"}, "owner": {"type":"string"}, "arr": money, "seats": {"type":"integer"}, "notes": {"type":"string"} }), &["name"]),
         tool("gain_account_list", "Accounts with ARR, seats, contract dates.", json!({ "include_inactive": {"type":"boolean"} }), &[]),
         tool("gain_account_show", "One account with current health and components, score trend, signals, open CTAs and triage.", json!({ "account": acc, "as_of": date }), &["account"]),
-        tool("gain_account_update", "Change account fields; null clears. active=false retires an account.", json!({ "account": acc, "name": {"type":"string"}, "domain": {"type":["string","null"]}, "owner": {"type":["string","null"]}, "arr": money, "seats": {"type":["integer","null"]}, "contract_id": {"type":["string","null"]}, "term_end": {"type":["string","null"]}, "last_notice": {"type":["string","null"]}, "renewal_months": {"type":["integer","null"]}, "active": {"type":"boolean"}, "notes": {"type":"string"} }), &["account"]),
+        tool("gain_account_update", "Change account fields; null clears. active=false retires an account.", json!({ "account": acc, "name": {"type":"string"}, "domain": {"type":["string","null"]}, "owner": {"type":["string","null"]}, "arr": money, "seats": {"type":["integer","null"]}, "contract_id": {"type":["string","null"]}, "term_end": {"type":["string","null"]}, "last_notice": {"type":["string","null"]}, "renewal_months": {"type":["integer","null"]}, "active": {"type":"boolean"}, "retired_on": {"type":["string","null"], "description": "churn date (default: today when active turns false)"}, "notes": {"type":"string"} }), &["account"]),
         tool("gain_telemetry_import", "Import usage aggregates per account and day: account;date;active_users[;sessions;key_actions]. Per-person columns are refused (ArbVG / DSGVO). Re-importing a day replaces it.", json!({ "path": {"type":"string"}, "dry_run": {"type":"boolean"} }), &["path"]),
         tool("gain_signal_add", "Record a customer signal by hand (e.g. after a call): negative or positive, score 1-10, with a note.", json!({ "account": acc, "polarity": {"type":"string","enum":["negative","positive"]}, "score": {"type":"integer"}, "note": {"type":"string"}, "reference": {"type":"string"}, "date": date }), &["account", "score", "note"]),
         tool("gain_health", "Health score 0-100 of one account with components (adoption, recency, sentiment, modifier); stores a snapshot and raises CTAs.", json!({ "account": acc, "as_of": date }), &["account"]),
@@ -960,8 +1387,12 @@ pub fn tools() -> Vec<Value> {
         tool("gain_cta_resolve", "Resolve (or dismiss) a CTA with a note saying what was done.", json!({ "id": {"type":"integer"}, "note": {"type":"string"}, "dismiss": {"type":"boolean"} }), &["id", "note"]),
         tool("gain_deadlines", "Notice deadlines and term ends of accounts within N days (default 90).", json!({ "within_days": {"type":"integer"}, "as_of": date }), &[]),
         tool("gain_weights", "Show or set the health weights (adoption, recency, sentiment; must sum to 1).", json!({ "set": {"type":"object","properties":{"adoption":{"type":"number"},"recency":{"type":"number"},"sentiment":{"type":"number"}}} }), &[]),
-        tool("gain_inbox_drain", "Apply events from other craft apps: contractcraft contract.executed (ARR, contract dates) and deskcraft/formcraft signal.negative (sentiment). Unknown accounts are created and flagged.", json!({}), &[]),
+        tool("gain_inbox_drain", "Apply events from other craft apps: contractcraft contract.executed / contract.amended / contract.terminated (ARR, contract dates, exit CTA) and deskcraft/formcraft signal.negative / signal.positive (sentiment). Unknown accounts are created and flagged.", json!({}), &[]),
         tool("gain_demo_seed", "Fill an EMPTY database with three labelled demo accounts (healthy, dropping, fading) whose names match the other craft demos.", json!({}), &[]),
+        tool("gain_cta_add", "Create a call to action by hand (kind manual), e.g. a follow-up agreed in a call.", json!({ "account": acc, "title": {"type":"string"}, "due": date, "note": {"type":"string"} }), &["account", "title"]),
+        tool("gain_export", "Write the health report of all active accounts (worst first) as CSV (; and DE numbers) or Markdown. Format from the extension unless given.", json!({ "path": {"type":"string"}, "format": {"type":"string","enum":["csv","md"]}, "as_of": date, "overwrite": {"type":"boolean"} }), &["path"]),
+        tool("gain_backup", "Copy the whole database to a new file (consistent snapshot). Never overwrites.", json!({ "path": {"type":"string"} }), &["path"]),
+        tool("gain_churn_audit", "Churn-risk audit: accounts at risk now with reasons (band, 30-day drop, notice soon, sentiment), and a backtest of retired accounts: how the score ranked them lead_days before they left.", json!({ "as_of": date, "lead_days": {"type":"integer", "description": "7-365, default 90"} }), &[]),
     ]
 }
 

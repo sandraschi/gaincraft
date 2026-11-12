@@ -1,0 +1,49 @@
+{
+  "manifest_version": "0.2",
+  "name": "gaincraft",
+  "display_name": "gaincraft",
+  "version": "__VERSION__",
+  "description": "Customer health for small B2B: aggregate usage (no per-person data), contracts, support signals, an explainable 0-100 score, calls to action, renewals, churn audit.",
+  "author": {
+    "name": "Sandra Schipal",
+    "url": "https://github.com/sandraschi"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sandraschi/gaincraft"
+  },
+  "license": "MIT OR Apache-2.0",
+  "server": {
+    "type": "binary",
+    "entry_point": "gaincraft.exe",
+    "mcp_config": {
+      "command": "${__dirname}/gaincraft.exe",
+      "args": ["mcp"]
+    }
+  },
+  "compatibility": {
+    "platforms": ["win32"]
+  },
+  "tools": [
+    { "name": "gain_status", "description": "Active accounts, ARR, telemetry days, open CTAs, signals, health weights." },
+    { "name": "gain_account_add", "description": "Add a customer account." },
+    { "name": "gain_account_list", "description": "Accounts with ARR, seats, contract dates." },
+    { "name": "gain_account_show", "description": "One account with health components, trend, signals, open CTAs and triage." },
+    { "name": "gain_account_update", "description": "Change account fields; active=false retires an account with a churn date." },
+    { "name": "gain_telemetry_import", "description": "Import usage aggregates per account and day; per-person columns are refused." },
+    { "name": "gain_signal_add", "description": "Record a customer signal by hand." },
+    { "name": "gain_health", "description": "Health score of one account; stores a snapshot and raises CTAs." },
+    { "name": "gain_health_all", "description": "Health of all active accounts, worst first, ARR at risk." },
+    { "name": "gain_triage_set", "description": "Advisory modifier 0.8-1.2 with a reason and an expiry." },
+    { "name": "gain_cta_list", "description": "Open calls to action, due first." },
+    { "name": "gain_cta_resolve", "description": "Resolve or dismiss a CTA with a note." },
+    { "name": "gain_deadlines", "description": "Notice deadlines and term ends within N days." },
+    { "name": "gain_weights", "description": "Show or set the health weights." },
+    { "name": "gain_inbox_drain", "description": "Apply contract and signal events from the other craft apps." },
+    { "name": "gain_demo_seed", "description": "Fill an empty database with three labelled demo accounts." },
+    { "name": "gain_cta_add", "description": "Create a call to action by hand." },
+    { "name": "gain_export", "description": "Write the health report as CSV or Markdown." },
+    { "name": "gain_backup", "description": "Copy the whole database to a new file." },
+    { "name": "gain_churn_audit", "description": "Who is at risk and why, and a backtest of retired accounts." }
+  ]
+}

@@ -1,0 +1,22 @@
+# gaincraft v0.3.0
+
+Customer health for small B2B, local, one SQLite file. Windows x64.
+
+## Downloads
+
+- `gaincraft-app.exe`: the desktop window.
+- `gaincraft.exe`: CLI and MCP server (`gaincraft mcp --allow-path <dir>`).
+- `gaincraft-0.3.0-setup.exe`: per-user installer for both (no admin rights). Customer data stays in `%LOCALAPPDATA%\gaincraft`.
+- `gaincraft-v0.3.0.mcpb`: MCP bundle.
+
+## What is new
+
+- Full menu bar (File, Edit, View, Insert, Modify, Commands, Window, Help) with keyboard shortcuts and the Help suite: command palette, shortcut sheet (F1), project docs, licenses, about.
+- Undo / redo for edits made in the window.
+- Churn audit: who is at risk now and why, and a backtest of customers who left.
+- Health report export (CSV or Markdown) and database backup.
+- Manual calls to action; German CTA titles; 12-month health trend in Customer 360.
+- Contract amendments and terminations and positive survey signals are understood (the sending apps do not emit them yet).
+- Databases from 0.2.0 are upgraded in place on first open.
+
+Synthetic demo data only (`gaincraft demo-seed`). No per-person tracking. See HELP.md and docs/PRD.md.

@@ -16,7 +16,9 @@ use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::Serialize;
 use std::path::Path;
 
-pub const SCHEMA_VERSION: i64 = 1;
+/// 2: `accounts.retired_on` (churn date for the backtest), `ctas.params`
+/// (structured values so the window can word CTA titles in any language).
+pub const SCHEMA_VERSION: i64 = 2;
 
 #[derive(Debug, thiserror::Error)]
 pub enum GainError {
@@ -58,6 +60,8 @@ pub struct Account {
     pub auto_created: bool,
     pub active: bool,
     pub notes: String,
+    /// Day the account was retired (churned). Set when `active` turns false.
+    pub retired_on: Option<NaiveDate>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -85,6 +89,8 @@ pub struct AccountPatch {
     pub renewal_months: Option<Option<i64>>,
     pub active: Option<bool>,
     pub notes: Option<String>,
+    /// Churn date. Unset: today when `active` turns false, cleared when it turns true.
+    pub retired_on: Option<Option<NaiveDate>>,
 }
 
 /// One account-day of usage. Deliberately no user field.
@@ -144,6 +150,8 @@ pub struct Cta {
     pub last_seen: NaiveDate,
     pub resolution: Option<String>,
     pub resolved_by: Option<String>,
+    /// JSON object with the values behind the title (score, percent, date...).
+    pub params: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -233,7 +241,14 @@ CREATE TABLE IF NOT EXISTS snapshots (
 );
 ";
 
-const ACC_COLS: &str = "id, key, name, domain, owner, arr_cents, seats, contract_id, term_end, last_notice, renewal_months, auto_created, active, notes";
+const ACC_COLS: &str = "id, key, name, domain, owner, arr_cents, seats, contract_id, term_end, last_notice, renewal_months, auto_created, active, notes, retired_on";
+
+/// Schema steps after version 1. Each runs once, in order, in one transaction.
+const MIGRATIONS: &[(i64, &str)] = &[(
+    2,
+    "ALTER TABLE accounts ADD COLUMN retired_on TEXT;
+     ALTER TABLE ctas ADD COLUMN params TEXT NOT NULL DEFAULT '{}';",
+)];
 
 fn acc_row(r: &Row) -> rusqlite::Result<Account> {
     Ok(Account {
@@ -251,6 +266,7 @@ fn acc_row(r: &Row) -> rusqlite::Result<Account> {
         auto_created: r.get(11)?,
         active: r.get(12)?,
         notes: r.get(13)?,
+        retired_on: r.get(14)?,
     })
 }
 
@@ -321,19 +337,31 @@ impl Gain {
                 |r| r.get(0),
             )
             .optional()?;
-        match v.as_deref() {
+        let have: i64 = match v.as_deref() {
             None => {
                 conn.execute(
-                    "INSERT INTO meta (key, value) VALUES ('schema_version', ?1)",
-                    params![SCHEMA_VERSION.to_string()],
+                    "INSERT INTO meta (key, value) VALUES ('schema_version', '1')",
+                    [],
                 )?;
+                1
             }
-            Some(x) if x == SCHEMA_VERSION.to_string() => {}
-            Some(x) => {
-                return Err(GainError::Db(format!(
-                    "database schema {x} is newer than this build ({SCHEMA_VERSION})"
-                )))
-            }
+            Some(x) => x
+                .parse()
+                .map_err(|_| GainError::Db(format!("schema_version {x:?} is not a number")))?,
+        };
+        if have > SCHEMA_VERSION {
+            return Err(GainError::Db(format!(
+                "database schema {have} is newer than this build ({SCHEMA_VERSION})"
+            )));
+        }
+        for (to, sql) in MIGRATIONS.iter().filter(|(to, _)| *to > have) {
+            let tx = conn.unchecked_transaction()?;
+            tx.execute_batch(sql)?;
+            tx.execute(
+                "UPDATE meta SET value = ?1 WHERE key = 'schema_version'",
+                params![to.to_string()],
+            )?;
+            tx.commit()?;
         }
         Ok(Gain { conn })
     }
@@ -487,13 +515,25 @@ impl Gain {
         }
         let arr = p.arr_cents.unwrap_or(a.arr_cents);
         let seats = p.seats.unwrap_or(a.seats);
+        let active = p.active.unwrap_or(a.active);
+        let retired_on = match p.retired_on {
+            Some(d) => d,
+            None if !active && a.active => Some(Utc::now().date_naive()),
+            None if active => None,
+            None => a.retired_on,
+        };
+        if active && retired_on.is_some() {
+            return Err(GainError::Invalid(
+                "an active account has no retirement date (pass active=false)".into(),
+            ));
+        }
         if arr.is_some_and(|v| v < 0) || seats.is_some_and(|v| v <= 0) {
             return Err(GainError::Invalid(
                 "ARR cannot be negative, seats must be positive".into(),
             ));
         }
         self.conn.execute(
-            "UPDATE accounts SET name = ?2, domain = ?3, owner = ?4, arr_cents = ?5, seats = ?6, contract_id = ?7, term_end = ?8, last_notice = ?9, renewal_months = ?10, active = ?11, notes = ?12, auto_created = 0 WHERE id = ?1",
+            "UPDATE accounts SET name = ?2, domain = ?3, owner = ?4, arr_cents = ?5, seats = ?6, contract_id = ?7, term_end = ?8, last_notice = ?9, renewal_months = ?10, active = ?11, notes = ?12, retired_on = ?13, auto_created = 0 WHERE id = ?1",
             params![
                 a.id,
                 name,
@@ -505,8 +545,9 @@ impl Gain {
                 p.term_end.unwrap_or(a.term_end),
                 p.last_notice.unwrap_or(a.last_notice),
                 p.renewal_months.unwrap_or(a.renewal_months),
-                p.active.unwrap_or(a.active),
-                p.notes.as_deref().map(str::trim).unwrap_or(&a.notes)
+                active,
+                p.notes.as_deref().map(str::trim).unwrap_or(&a.notes),
+                retired_on
             ],
         )?;
         self.account_by_id(a.id)
@@ -703,20 +744,74 @@ impl Gain {
         due: Option<NaiveDate>,
         today: NaiveDate,
     ) -> Result<bool> {
-        let n = self.conn.execute("UPDATE ctas SET last_seen = ?4, title = ?5, due = ?6 WHERE account_id = ?1 AND kind = ?2 AND reference = ?3 AND status = 'open'", params![account_id, kind, reference, today, title, due])?;
+        self.raise_cta_with(account_id, kind, reference, title, "{}", due, today)
+    }
+
+    /// [`Gain::raise_cta`] with the structured values behind the title (JSON object).
+    #[allow(clippy::too_many_arguments)]
+    pub fn raise_cta_with(
+        &self,
+        account_id: i64,
+        kind: &str,
+        reference: &str,
+        title: &str,
+        params_json: &str,
+        due: Option<NaiveDate>,
+        today: NaiveDate,
+    ) -> Result<bool> {
+        if title.trim().is_empty() || title.chars().count() > 300 {
+            return Err(GainError::Invalid(
+                "CTA title must be 1-300 characters".into(),
+            ));
+        }
+        let n = self.conn.execute("UPDATE ctas SET last_seen = ?4, title = ?5, due = ?6, params = ?7 WHERE account_id = ?1 AND kind = ?2 AND reference = ?3 AND status = 'open'", params![account_id, kind, reference, today, title.trim(), due, params_json])?;
         if n > 0 {
             return Ok(false);
         }
         self.conn.execute(
-            "INSERT INTO ctas (account_id, kind, reference, title, due, status, created_on, last_seen) VALUES (?1, ?2, ?3, ?4, ?5, 'open', ?6, ?6)",
-            params![account_id, kind, reference, title, due, today],
+            "INSERT INTO ctas (account_id, kind, reference, title, due, status, created_on, last_seen, params) VALUES (?1, ?2, ?3, ?4, ?5, 'open', ?6, ?6, ?7)",
+            params![account_id, kind, reference, title.trim(), due, today, params_json],
         )?;
         Ok(true)
     }
 
+    /// Next free reference for a hand-made CTA (`manual-N`).
+    pub fn next_manual_ref(&self) -> Result<String> {
+        let n: i64 = self
+            .conn
+            .query_row("SELECT COALESCE(MAX(id), 0) + 1 FROM ctas", [], |r| {
+                r.get(0)
+            })?;
+        Ok(format!("manual-{n}"))
+    }
+
+    /// One CTA by id, open or closed.
+    pub fn cta(&self, id: i64) -> Result<Cta> {
+        self.ctas(None, true)?
+            .into_iter()
+            .find(|c| c.id == id)
+            .ok_or_else(|| GainError::NotFound(format!("CTA {id}")))
+    }
+
+    /// Copy the whole database to `path` (a consistent snapshot, WAL included).
+    /// Refuses to overwrite an existing file.
+    pub fn backup_to(&self, path: &Path) -> Result<u64> {
+        if path.exists() {
+            return Err(GainError::Conflict(format!(
+                "{} exists; choose a new file name",
+                path.display()
+            )));
+        }
+        self.conn
+            .execute("VACUUM INTO ?1", params![path.to_string_lossy()])?;
+        std::fs::metadata(path)
+            .map(|m| m.len())
+            .map_err(|e| GainError::Db(e.to_string()))
+    }
+
     pub fn ctas(&self, account_id: Option<i64>, include_closed: bool) -> Result<Vec<Cta>> {
         let mut st = self.conn.prepare(&format!(
-            "SELECT c.id, a.key, c.kind, c.reference, c.title, c.due, c.status, c.created_on, c.last_seen, c.resolution, c.resolved_by FROM ctas c JOIN accounts a ON a.id = c.account_id
+            "SELECT c.id, a.key, c.kind, c.reference, c.title, c.due, c.status, c.created_on, c.last_seen, c.resolution, c.resolved_by, c.params FROM ctas c JOIN accounts a ON a.id = c.account_id
              WHERE (?1 IS NULL OR c.account_id = ?1) {} ORDER BY CASE WHEN c.due IS NULL THEN 1 ELSE 0 END, c.due, c.id",
             if include_closed { "" } else { "AND c.status = 'open'" }
         ))?;
@@ -734,6 +829,7 @@ impl Gain {
                     last_seen: r.get(8)?,
                     resolution: r.get(9)?,
                     resolved_by: r.get(10)?,
+                    params: r.get(11)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -751,10 +847,7 @@ impl Gain {
         if n == 0 {
             return Err(GainError::NotFound(format!("open CTA {id}")));
         }
-        self.ctas(None, true)?
-            .into_iter()
-            .find(|c| c.id == id)
-            .ok_or_else(|| GainError::NotFound(format!("CTA {id}")))
+        self.cta(id)
     }
 
     // ---------- snapshots ----------

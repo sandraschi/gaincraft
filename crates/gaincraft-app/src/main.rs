@@ -9,13 +9,17 @@
 use chrono::{Duration, Local, NaiveDate};
 use craft_biz::bus::Bus;
 use craft_biz::Money;
-use craft_biz_ui::app::{self, Frame, NavEntry, SuiteApp, Wiring};
+use craft_biz_ui::app::{self, AppMenus, Frame, NavEntry, SuiteApp, Wiring};
+use craft_biz_ui::help::{AppInfo, Doc, ShortcutRow};
 use craft_biz_ui::kanban::{self, Board, Card, Column, Lane};
+use craft_biz_ui::menu::{Item, Menu};
 use craft_biz_ui::table::{Cell, Col, Table, TableEvent};
 use craft_biz_ui::theme::{self, semibold};
 use craft_biz_ui::widgets::Kpi;
 use craft_biz_ui::{widgets, Tone};
-use egui::{Align2, CornerRadius, FontId, Pos2, Rect, RichText, Sense, Stroke, Ui, Vec2};
+use egui::{
+    Align2, CornerRadius, FontId, Key, Modifiers, Pos2, Rect, RichText, Sense, Stroke, Ui, Vec2,
+};
 use gaincraft_core::health::{Health, Weights};
 use gaincraft_core::{dispatch, health_of, parse_telemetry, tools, Command, Confinement, Ctx};
 use gaincraft_store::{Account, Cta, Day, Gain, Signal, Stats, Triage};
@@ -63,7 +67,30 @@ pub const COVERAGE: &[(&str, &str)] = &[
         "gain_demo_seed",
         "Overview empty state; Settings > Demo data",
     ),
+    (
+        "gain_cta_add",
+        "Insert > Create Call-to-Action; Customer 360 > New CTA",
+    ),
+    ("gain_export", "File > Export Health Report / CSV"),
+    ("gain_backup", "File > Save Copy As"),
+    (
+        "gain_churn_audit",
+        "Commands > Audit Churn Risk; Overview > Churn audit",
+    ),
 ];
+
+/// How many undo steps the window keeps (this session only).
+const UNDO_MAX: usize = 50;
+
+/// One undoable change made from the window: the call that reverses it and
+/// the original call (for redo).
+#[derive(Debug, Clone)]
+struct Journal {
+    de: String,
+    en: String,
+    undo: (String, Value),
+    redo: (String, Value),
+}
 
 struct Row {
     a: Account,
@@ -77,6 +104,9 @@ struct Detail {
     days: Vec<Day>,
     triage: Option<Triage>,
     signals: Vec<Signal>,
+    /// Health at the end of each of the last 12 months, recomputed from
+    /// stored data; None where the account had no usage yet.
+    monthly: Vec<(NaiveDate, Option<(i64, &'static str)>)>,
 }
 
 #[derive(Default)]
@@ -110,6 +140,9 @@ pub struct GainApp {
     detail: Option<Detail>,
     import: Import,
     owner_lanes: bool,
+    lang_de: bool,
+    undo: Vec<Journal>,
+    redo: Vec<Journal>,
 }
 
 fn eur(c: i64) -> String {
@@ -147,8 +180,61 @@ fn kind_label(k: &str, de: bool) -> &'static str {
         ("renewal", false) => "Renewal",
         ("negative_signal", true) => "Unzufrieden",
         ("negative_signal", false) => "Unhappy customer",
+        ("termination", true) => "Kündigung",
+        ("termination", false) => "Termination",
+        ("manual", true) => "Manuell",
+        ("manual", false) => "Manual",
         (_, true) => "Aufgabe",
         (_, false) => "Task",
+    }
+}
+
+/// CTA title in the window's language, from the values the core stored
+/// with it. Falls back to the stored (English) title.
+fn cta_title(c: &Cta, de: bool) -> String {
+    if !de || c.kind == "manual" {
+        return c.title.clone();
+    }
+    let p: Value = serde_json::from_str(&c.params).unwrap_or(Value::Null);
+    let s = |k: &str| p[k].as_str().map(str::to_string);
+    let n = |k: &str| p[k].as_i64();
+    match c.kind.as_str() {
+        "low_health" => match (n("score"), s("name")) {
+            (Some(sc), Some(nm)) => format!("Gesundheit {sc} (kritisch): mit {nm} sprechen"),
+            _ => c.title.clone(),
+        },
+        "adoption_drop" => match n("pct") {
+            Some(x) => format!("Nutzung {x}% unter den zwei Wochen davor"),
+            None => c.title.clone(),
+        },
+        "seats_unused" => match (p["avg"].as_f64(), n("seats")) {
+            (Some(a), Some(st)) => format!(
+                "Nur {} von {st} Lizenzen im Schnitt aktiv",
+                format!("{a:.1}").replace('.', ",")
+            ),
+            _ => c.title.clone(),
+        },
+        "renewal" => match s("date") {
+            Some(d) => format!("Kündigungsfrist {d}: Verlängerung sichern"),
+            None => c.title.clone(),
+        },
+        "negative_signal" => match (s("source"), s("reference"), n("score")) {
+            (Some(src), Some(rf), Some(sc)) => {
+                format!("Unzufriedenes Signal von {src} ({rf}), Wert {sc}")
+            }
+            _ => c.title.clone(),
+        },
+        "termination" => match s("contract") {
+            Some(k) => format!(
+                "Vertrag {k} gekündigt{}: Abschlussgespräch, nach Vertragsende stilllegen",
+                s("effective")
+                    .filter(|e| !e.is_empty())
+                    .map(|e| format!(" (wirksam {e})"))
+                    .unwrap_or_default()
+            ),
+            None => c.title.clone(),
+        },
+        _ => c.title.clone(),
     }
 }
 
@@ -159,6 +245,8 @@ fn kind_tone(k: &str) -> Tone {
         "seats_unused" => Tone::Neutral,
         "renewal" => Tone::Info,
         "negative_signal" => Tone::Violet,
+        "termination" => Tone::Danger,
+        "manual" => Tone::Accent,
         _ => Tone::Neutral,
     }
 }
@@ -175,6 +263,113 @@ fn frac_tone(x: f64) -> Tone {
 
 fn date_de(d: NaiveDate) -> String {
     d.format("%d.%m.%Y").to_string()
+}
+
+/// Last day of the month `back` months before `today`'s month; for back = 0, today.
+fn month_end(today: NaiveDate, back: u32) -> NaiveDate {
+    use chrono::Datelike;
+    if back == 0 {
+        return today;
+    }
+    let months = today.year() * 12 + today.month0() as i32 - back as i32 + 1;
+    let (y, m0) = (months.div_euclid(12), months.rem_euclid(12) as u32);
+    NaiveDate::from_ymd_opt(y, m0 + 1, 1)
+        .map(|first_of_next| first_of_next - Duration::days(1))
+        .unwrap_or(today)
+}
+
+const MONTHS_DE: [&str; 12] = [
+    "Jan", "Feb", "Mär", "Apr", "Mai", "Jun", "Jul", "Aug", "Sep", "Okt", "Nov", "Dez",
+];
+const MONTHS_EN: [&str; 12] = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
+
+/// Bars of month-end health scores, coloured by band; months before the
+/// first usage are drawn as "no data" instead of a misleading low score.
+fn health_months(ui: &mut Ui, months: &[(NaiveDate, Option<(i64, &'static str)>)], de: bool) {
+    use chrono::Datelike;
+    let t = theme::current(ui.ctx());
+    let w = ui.available_width().max(240.0);
+    let h = 120.0;
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, h), Sense::hover());
+    let p = ui.painter_at(rect);
+    let plot = Rect::from_min_max(
+        rect.min + Vec2::new(0.0, 14.0),
+        rect.max - Vec2::new(0.0, 18.0),
+    );
+    for lvl in [40.0f32, 70.0] {
+        let y = plot.bottom() - plot.height() * lvl / 100.0;
+        p.line_segment(
+            [Pos2::new(plot.left(), y), Pos2::new(plot.right(), y)],
+            Stroke::new(1.0, t.border),
+        );
+    }
+    let n = months.len().max(1) as f32;
+    let slot = plot.width() / n;
+    let mut hover = None;
+    for (i, (d, v)) in months.iter().enumerate() {
+        let x0 = plot.left() + slot * i as f32 + slot * 0.18;
+        let x1 = plot.left() + slot * (i as f32 + 1.0) - slot * 0.18;
+        let label = if de { MONTHS_DE } else { MONTHS_EN }[d.month0() as usize];
+        p.text(
+            Pos2::new((x0 + x1) / 2.0, rect.bottom() - 2.0),
+            Align2::CENTER_BOTTOM,
+            label,
+            FontId::proportional(11.0),
+            t.text_weak,
+        );
+        let bar = match v {
+            Some((score, band)) => {
+                let top = plot.bottom() - plot.height() * (*score as f32).clamp(0.0, 100.0) / 100.0;
+                let r = Rect::from_min_max(Pos2::new(x0, top), Pos2::new(x1, plot.bottom()));
+                p.rect_filled(
+                    r,
+                    CornerRadius::same(3),
+                    theme::tone_solid(band_tone(band), t.dark),
+                );
+                p.text(
+                    Pos2::new((x0 + x1) / 2.0, top - 2.0),
+                    Align2::CENTER_BOTTOM,
+                    score.to_string(),
+                    FontId::monospace(11.0),
+                    t.text,
+                );
+                r
+            }
+            None => {
+                let r = Rect::from_min_max(
+                    Pos2::new(x0, plot.bottom() - 6.0),
+                    Pos2::new(x1, plot.bottom()),
+                );
+                p.rect_stroke(
+                    r,
+                    CornerRadius::same(2),
+                    Stroke::new(1.0, t.border),
+                    egui::StrokeKind::Inside,
+                );
+                r
+            }
+        };
+        if resp.hover_pos().is_some_and(|hp| hp.x >= x0 && hp.x <= x1) {
+            hover = Some((bar, *d, *v));
+        }
+    }
+    if let Some((_, d, v)) = hover {
+        let text = match v {
+            Some((s, b)) => format!("{}: {s} ({})", date_de(d), band_label(b, de)),
+            None => format!(
+                "{}: {}",
+                date_de(d),
+                if de {
+                    "noch keine Nutzungsdaten"
+                } else {
+                    "no usage data yet"
+                }
+            ),
+        };
+        resp.on_hover_text(text);
+    }
 }
 
 /// The weakest component, in words, for the "needs attention" list.
@@ -210,6 +405,82 @@ impl GainApp {
             detail: None,
             import: Import::default(),
             owner_lanes: false,
+            lang_de: true,
+            undo: Vec::new(),
+            redo: Vec::new(),
+        }
+    }
+
+    /// Dispatch without touching the undo journal.
+    fn call_raw(&mut self, tool: &str, args: &Value) -> Result<Value, String> {
+        let cmd = Command::from_tool(tool, args)?;
+        dispatch(&mut self.ctx, cmd)
+    }
+
+    /// The call that reverses `tool(args)`, computed from the state before it
+    /// runs. Only edits are undoable; records (signals, resolved CTAs,
+    /// imports, bus events) are not, by design.
+    fn inverse_before(&self, tool: &str, args: &Value) -> Option<(String, String, Value)> {
+        let g = &self.ctx.gain;
+        let acc = || g.account(args["account"].as_str()?).ok();
+        match tool {
+            "gain_account_update" => {
+                let a = acc()?;
+                let iso = |d: Option<NaiveDate>| d.map(|d| d.to_string());
+                let mut inv = json!({ "account": a.key });
+                for k in args.as_object()?.keys() {
+                    let old = match k.as_str() {
+                        "name" => json!(a.name),
+                        "domain" => json!(a.domain),
+                        "owner" => json!(a.owner),
+                        "arr" => json!(a.arr_cents.map(eur)),
+                        "seats" => json!(a.seats),
+                        "contract_id" => json!(a.contract_id),
+                        "term_end" => json!(iso(a.term_end)),
+                        "last_notice" => json!(iso(a.last_notice)),
+                        "renewal_months" => json!(a.renewal_months),
+                        "active" => json!(a.active),
+                        "retired_on" => json!(iso(a.retired_on)),
+                        "notes" => json!(a.notes),
+                        _ => continue,
+                    };
+                    inv[k.as_str()] = old;
+                }
+                if args["active"] == false && a.active {
+                    Some((
+                        format!("Stilllegen {}", a.name),
+                        format!("retire {}", a.name),
+                        inv,
+                    ))
+                } else {
+                    Some((
+                        format!("Änderung {}", a.name),
+                        format!("edit {}", a.name),
+                        inv,
+                    ))
+                }
+            }
+            "gain_triage_set" => {
+                let a = acc()?;
+                let inv = match g.triage(a.id, self.today).ok()? {
+                    Some(t) => json!({
+                        "account": a.key, "modifier": t.modifier, "reason": t.reason,
+                        "days": (t.expires - self.today).num_days().clamp(1, 90),
+                    }),
+                    None => json!({ "account": a.key, "clear": true }),
+                };
+                Some((
+                    format!("Triage {}", a.name),
+                    format!("triage {}", a.name),
+                    inv,
+                ))
+            }
+            "gain_weights" if args.get("set").is_some_and(|s| !s.is_null()) => Some((
+                "Gewichte".into(),
+                "weights".into(),
+                json!({ "set": self.weights }),
+            )),
+            _ => None,
         }
     }
 
@@ -252,11 +523,27 @@ impl GainApp {
         let signals = g
             .signals(Some(a.id), Some(self.today - Duration::days(180)))
             .map_err(|e| e.to_string())?;
+        let mut monthly = Vec::with_capacity(12);
+        for back in (0..12).rev() {
+            let end = month_end(self.today, back);
+            let seen = g
+                .last_active_day(a.id, end)
+                .map_err(|e| e.to_string())?
+                .is_some();
+            let v = if seen {
+                let h = health_of(g, &a, end)?;
+                Some((h.score, h.band))
+            } else {
+                None
+            };
+            monthly.push((end, v));
+        }
         self.detail = Some(Detail {
             key: a.key,
             days,
             triage,
             signals,
+            monthly,
         });
         Ok(())
     }
@@ -325,6 +612,15 @@ impl GainApp {
                     "gain_health_all",
                     json!({}),
                 );
+            }
+            if ui
+                .button(f.t("Abwanderungs-Check", "Churn audit"))
+                .on_hover_text(
+                    "gain_churn_audit: who is at risk and why, and a backtest of retired accounts",
+                )
+                .clicked()
+            {
+                f.run_show("gain_churn_audit", json!({}));
             }
         });
         if self.rows.is_empty() {
@@ -565,7 +861,12 @@ impl GainApp {
             .filter(|c| {
                 app::search_hit(
                     &f.search,
-                    &[&c.title, &c.account, &self.name_of(&c.account)],
+                    &[
+                        &c.title,
+                        &cta_title(c, de),
+                        &c.account,
+                        &self.name_of(&c.account),
+                    ],
                 )
             })
             .map(|c| {
@@ -602,7 +903,7 @@ impl GainApp {
                         String::new()
                     },
                     key: format!("CTA-{}", c.id),
-                    title: c.title.clone(),
+                    title: cta_title(c, de),
                     tags: vec![(kind_label(&c.kind, de).into(), kind_tone(&c.kind))],
                     accent: band,
                     badge: self.row(&c.account).map(|r| (r.h.score.to_string(), band)),
@@ -1305,6 +1606,9 @@ impl GainApp {
             if ui.button(f.t("Signal", "Add signal")).clicked() {
                 f.form("gain_signal_add", &[("account", &key)]);
             }
+            if ui.button(f.t("Neue Aufgabe", "New CTA")).clicked() {
+                f.form("gain_cta_add", &[("account", &key)]);
+            }
             if ui
                 .button("Triage")
                 .on_hover_text("advisory modifier 0.8-1.2 with a reason")
@@ -1339,6 +1643,9 @@ impl GainApp {
         ui.add_space(10.0);
         widgets::section(ui, f.t("Nutzung, 90 Tage", "Usage, 90 days"), None);
         usage_chart(ui, &d.days, a.seats, self.today);
+        ui.add_space(10.0);
+        widgets::section(ui, f.t("Gesundheit, 12 Monate", "Health, 12 months"), None);
+        health_months(ui, &d.monthly, de);
         ui.add_space(10.0);
         widgets::section(ui, f.t("Vertrag", "Contract"), None);
         widgets::field(ui, f.t("Vertrag", "Contract"), |ui| {
@@ -1404,7 +1711,7 @@ impl GainApp {
                         );
                     }
                 });
-                ui.label(&c.title);
+                ui.label(cta_title(c, de));
                 ui.horizontal(|ui| {
                     let id = c.id.to_string();
                     if ui.button(f.t("Lösen", "Resolve")).clicked() {
@@ -1456,7 +1763,11 @@ impl GainApp {
         };
         let de = f.lang_de;
         ui.label(RichText::new(format!("CTA-{}", c.id)).family(egui::FontFamily::Monospace));
-        ui.label(RichText::new(&c.title).family(semibold()).size(17.0));
+        ui.label(
+            RichText::new(cta_title(&c, f.lang_de))
+                .family(semibold())
+                .size(17.0),
+        );
         ui.horizontal_wrapped(|ui| {
             widgets::pill(ui, kind_label(&c.kind, de), kind_tone(&c.kind));
             widgets::pill(
@@ -1846,9 +2157,57 @@ impl SuiteApp for GainApp {
     fn tools(&self) -> Vec<Value> {
         tools()
     }
+    /// Every window change comes through here: dispatch, and journal the
+    /// inverse of edits so Edit > Undo can reverse them.
     fn call(&mut self, tool: &str, args: &Value) -> Result<Value, String> {
-        let cmd = Command::from_tool(tool, args)?;
-        dispatch(&mut self.ctx, cmd)
+        let before = self.inverse_before(tool, args);
+        let out = self.call_raw(tool, args)?;
+        let entry = match (tool, before) {
+            (_, Some((de, en, inv))) => Some((de, en, inv)),
+            // Undo of an add deactivates without a churn date, so the backtest
+            // never mistakes it for a lost customer.
+            ("gain_account_add", None) => out["key"].as_str().map(|k| {
+                (
+                    format!("Kunde anlegen {k}"),
+                    format!("add account {k}"),
+                    json!({ "account": k, "active": false, "retired_on": null }),
+                )
+            }),
+            ("gain_cta_add", None) => out["id"].as_i64().map(|id| {
+                (
+                    format!("Aufgabe CTA-{id}"),
+                    format!("CTA-{id}"),
+                    json!({ "id": id, "dismiss": true, "note": "undone with Edit > Undo" }),
+                )
+            }),
+            _ => None,
+        };
+        if let Some((de, en, inv)) = entry {
+            let undo_tool = match tool {
+                "gain_account_add" => "gain_account_update",
+                "gain_cta_add" => "gain_cta_resolve",
+                t => t,
+            };
+            // Redo of an add re-activates the same account (adding it again
+            // would conflict with its key).
+            let redo = match (tool, out["key"].as_str()) {
+                ("gain_account_add", Some(k)) => (
+                    "gain_account_update".to_string(),
+                    json!({ "account": k, "active": true, "retired_on": null }),
+                ),
+                _ => (tool.to_string(), args.clone()),
+            };
+            self.undo.push(Journal {
+                de,
+                en,
+                undo: (undo_tool.into(), inv),
+                redo,
+            });
+            if self.undo.len() > UNDO_MAX {
+                self.undo.remove(0);
+            }
+        }
+        Ok(out)
     }
     fn reload(&mut self) -> Result<(), String> {
         self.today = Local::now().date_naive();
@@ -1920,6 +2279,7 @@ impl SuiteApp for GainApp {
         ]
     }
     fn view(&mut self, ui: &mut Ui, view: usize, f: &mut Frame) {
+        self.lang_de = f.lang_de;
         egui::ScrollArea::vertical()
             .id_salt(("gain_view", view))
             .auto_shrink([false, false])
@@ -1964,8 +2324,20 @@ impl SuiteApp for GainApp {
                     "contractcraft: ARR, contract number, notice date and term end",
                 ),
                 (
+                    "contract.amended",
+                    "contractcraft: changed ARR or dates (sender not built yet)",
+                ),
+                (
+                    "contract.terminated",
+                    "contractcraft: no renewal, exit CTA (sender not built yet)",
+                ),
+                (
                     "signal.negative",
                     "deskcraft / formcraft: unhappy customer, lowers sentiment",
+                ),
+                (
+                    "signal.positive",
+                    "formcraft: happy customer, raises sentiment (sender not built yet)",
                 ),
             ],
             vec![],
@@ -1988,6 +2360,407 @@ impl SuiteApp for GainApp {
     }
     fn smoke_tool(&self) -> &'static str {
         "gain_status"
+    }
+
+    fn set_lang(&mut self, de: bool) {
+        self.lang_de = de;
+    }
+
+    fn menus(&self, f: &Frame) -> AppMenus {
+        let cmd = Modifiers::COMMAND;
+        let cmd_shift = Modifiers::COMMAND | Modifiers::SHIFT;
+        let sel = self.sel.clone();
+        let acc = sel.as_deref().unwrap_or("");
+        let has_sel = sel.is_some();
+        let need_sel = f.t("Zuerst einen Kunden wählen", "Select an account first");
+        let cta = self
+            .sel_cta
+            .clone()
+            .filter(|id| self.open_ctas().any(|c| &c.id.to_string() == id));
+        let alt = |n: Key| (Modifiers::ALT, n);
+        let views = [
+            (f.t("Übersicht", "Overview"), V_OVERVIEW, Key::Num1),
+            (
+                f.t("Kundentabelle", "Accounts Table"),
+                V_ACCOUNTS,
+                Key::Num2,
+            ),
+            (
+                f.t("Aufgaben-Board (CTA)", "CTA Kanban Board"),
+                V_COCKPIT,
+                Key::Num3,
+            ),
+            (
+                f.t("Verlängerungen (Zeitachse)", "Renewals Timeline"),
+                V_RENEWALS,
+                Key::Num4,
+            ),
+            (f.t("Signale", "Signals Feed"), V_SIGNALS, Key::Num5),
+            (
+                f.t("Nutzung importieren", "Import Usage"),
+                V_IMPORT,
+                Key::Num6,
+            ),
+            (f.t("Einstellungen", "Settings"), V_SETTINGS, Key::Num7),
+        ];
+        let mut view = vec![Item::action(
+            f.t("Customer-360-Cockpit", "Customer 360 Cockpit"),
+            "gain.view_360",
+        )
+        .key(Modifiers::ALT, Key::Num0)];
+        for (label, v, k) in views {
+            let (m, k) = alt(k);
+            view.push(Item::view(label, v).key(m, k));
+        }
+        AppMenus {
+            file_new: vec![
+                Item::form(f.t("Neuer Kunde...", "New Account..."), "gain_account_add", &[])
+                    .key(cmd, Key::N),
+                Item::view(
+                    f.t("Nutzungs-CSV importieren...", "Import Usage CSV..."),
+                    V_IMPORT,
+                )
+                .key(cmd, Key::O),
+            ],
+            save_as: Some(
+                Item::form(
+                    f.t("Kopie speichern unter...", "Save Copy As..."),
+                    "gain_backup",
+                    &[],
+                )
+                .hint(f.t(
+                    "Sichert die ganze Datenbank in eine neue Datei",
+                    "Copies the whole database to a new file",
+                )),
+            ),
+            export: vec![
+                Item::form(
+                    f.t("Gesundheitsbericht exportieren...", "Export Health Report..."),
+                    "gain_export",
+                    &[("format", "md")],
+                )
+                .key(cmd, Key::E),
+                Item::form(
+                    f.t("Gesundheit als CSV exportieren...", "Export Health CSV..."),
+                    "gain_export",
+                    &[("format", "csv")],
+                )
+                .key(cmd_shift, Key::E),
+            ],
+            view,
+            middle: vec![
+                Menu::new(
+                    f.t("Einfügen", "Insert"),
+                    vec![
+                        Item::form(f.t("Kunde", "Add Account"), "gain_account_add", &[]),
+                        Item::form(
+                            f.t("Signal erfassen", "Add Manual Signal"),
+                            "gain_signal_add",
+                            &[("account", acc)],
+                        )
+                        .key(cmd_shift, Key::G),
+                        Item::form(
+                            f.t("Aufgabe (CTA) anlegen", "Create Call-to-Action (CTA)"),
+                            "gain_cta_add",
+                            &[("account", acc)],
+                        )
+                        .key(cmd_shift, Key::T),
+                        Item::form(
+                            f.t("Triage-Faktor setzen", "Add Triage Modifier"),
+                            "gain_triage_set",
+                            &[("account", acc), ("days", "30")],
+                        ),
+                    ],
+                ),
+                Menu::new(
+                    f.t("Ändern", "Modify"),
+                    vec![
+                        Item::form(
+                            f.t("ARR / Lizenzen bearbeiten", "Edit Account ARR / Seats"),
+                            "gain_account_update",
+                            &[("account", acc)],
+                        )
+                        .enabled(has_sel)
+                        .hint(need_sel),
+                        Item::form(
+                            f.t("Aufgabe lösen", "Resolve CTA"),
+                            "gain_cta_resolve",
+                            &[("id", cta.as_deref().unwrap_or(""))],
+                        )
+                        .enabled(cta.is_some())
+                        .hint(f.t(
+                            "Im Aufgaben-Board eine offene Karte wählen",
+                            "Select an open card on the CTA board",
+                        )),
+                        Item::action(
+                            f.t("Gewichte anpassen", "Update Health Weights"),
+                            "gain.weights",
+                        ),
+                        Item::run(
+                            f.t("Wert neu berechnen", "Recompute Score"),
+                            "gain_health",
+                            json!({ "account": acc }),
+                        )
+                        .enabled(has_sel)
+                        .hint(need_sel),
+                        Item::sep(),
+                        Item::action(f.t("Kunde stilllegen...", "Retire Account..."), "gain.retire")
+                            .enabled(has_sel)
+                            .hint(need_sel),
+                    ],
+                ),
+                Menu::new(
+                    f.t("Befehle", "Commands"),
+                    vec![
+                        Item::run(
+                            f.t("Signale übernehmen", "Drain Bus Signals"),
+                            "gain_inbox_drain",
+                            json!({}),
+                        )
+                        .key(cmd_shift, Key::D),
+                        Item::run(
+                            f.t("Alle Werte neu berechnen", "Recalculate Health Scores"),
+                            "gain_health_all",
+                            json!({}),
+                        )
+                        .key(cmd, Key::R),
+                        Item::run(
+                            f.t("Aufgaben-Regeln ausführen", "Run CTA Trigger Engine"),
+                            "gain_health_all",
+                            json!({}),
+                        )
+                        .hint(f.t(
+                            "Die fünf Regeln laufen im Gesundheitslauf; dieser Befehl startet ihn für alle Kunden",
+                            "The five CTA rules run in the health pass; this runs it for every account",
+                        )),
+                        Item::run(
+                            f.t("Abwanderungsrisiko prüfen", "Audit Churn Risk"),
+                            "gain_churn_audit",
+                            json!({}),
+                        )
+                        .key(cmd_shift, Key::A),
+                        Item::sep(),
+                        Item::run(
+                            f.t("Fristen (120 Tage)", "Deadlines (120 days)"),
+                            "gain_deadlines",
+                            json!({ "within_days": 120 }),
+                        ),
+                        Item::run(f.t("Status", "Status"), "gain_status", json!({})),
+                    ],
+                ),
+            ],
+            window: vec![
+                Item::action(
+                    f.t("Customer-360-Bereich", "Customer 360 Viewport"),
+                    "gain.view_360",
+                ),
+                Item::action(
+                    f.t("Board: Bahnen je Betreuer", "CTA Board: Lanes by Owner"),
+                    "gain.toggle_lanes",
+                )
+                .checked(self.owner_lanes),
+            ],
+        }
+    }
+
+    fn menu_action(&mut self, id: &str, f: &mut Frame) {
+        match id {
+            "gain.view_360" => {
+                if self.sel.is_none() {
+                    if let Some(k) = self.rows.first().map(|r| r.a.key.clone()) {
+                        GainApp::select(self, &k);
+                    }
+                }
+                f.goto(V_ACCOUNTS);
+            }
+            "gain.weights" => f.goto(V_SETTINGS),
+            "gain.toggle_lanes" => self.owner_lanes = !self.owner_lanes,
+            "gain.retire" => {
+                if let Some(k) = self.sel.clone() {
+                    let q = format!(
+                        "{} {}?",
+                        f.t("Kunden stilllegen:", "Retire account"),
+                        self.name_of(&k)
+                    );
+                    f.run_confirm(
+                        q,
+                        f.t("Kunde stillgelegt", "Account retired"),
+                        "gain_account_update",
+                        json!({ "account": k, "active": false }),
+                    );
+                }
+            }
+            other => f.toast(format!("unknown action {other}"), Tone::Danger),
+        }
+    }
+
+    fn undo_label(&self) -> Option<String> {
+        self.undo.last().map(|j| {
+            if self.lang_de {
+                j.de.clone()
+            } else {
+                j.en.clone()
+            }
+        })
+    }
+    fn redo_label(&self) -> Option<String> {
+        self.redo.last().map(|j| {
+            if self.lang_de {
+                j.de.clone()
+            } else {
+                j.en.clone()
+            }
+        })
+    }
+    fn undo(&mut self) -> Result<String, String> {
+        let j = self.undo.pop().ok_or("nothing to undo")?;
+        if let Err(e) = self.call_raw(&j.undo.0, &j.undo.1) {
+            self.undo.push(j);
+            return Err(e);
+        }
+        let msg = format!("undone: {}", j.en);
+        self.redo.push(j);
+        Ok(msg)
+    }
+    fn redo(&mut self) -> Result<String, String> {
+        let j = self.redo.pop().ok_or("nothing to redo")?;
+        // Through `call`, so a fresh inverse is journaled (new ids after re-adding).
+        if let Err(e) = SuiteApp::call(self, &j.redo.0, &j.redo.1) {
+            self.redo.push(j);
+            return Err(e);
+        }
+        Ok(format!("redone: {}", j.en))
+    }
+    fn copy_text(&self, view: usize) -> Option<String> {
+        if view == V_COCKPIT {
+            let id = self.sel_cta.as_ref()?;
+            let c = self.ctas.iter().find(|c| &c.id.to_string() == id)?;
+            return Some(format!(
+                "CTA-{} {} ({}): {}",
+                c.id,
+                self.name_of(&c.account),
+                c.kind,
+                cta_title(c, self.lang_de)
+            ));
+        }
+        let r = self.row(self.sel.as_ref()?)?;
+        Some(format!(
+            "{} ({}): health {} ({}), adoption {:.2}, recency {:.2}, sentiment {:.2}, modifier {:.2}, ARR {}",
+            r.a.name,
+            r.a.key,
+            r.h.score,
+            r.h.band,
+            r.h.adoption,
+            r.h.recency,
+            r.h.sentiment,
+            r.h.modifier,
+            r.a.arr_cents.map(eur).unwrap_or_else(|| "-".into())
+        ))
+    }
+    fn save(&mut self) -> Result<String, String> {
+        self.ctx
+            .gain
+            .conn()
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+            .map_err(|e| e.to_string())?;
+        Ok(if self.lang_de {
+            "gespeichert (jede Änderung wird sofort geschrieben; Protokoll in die Datenbank übernommen)".into()
+        } else {
+            "saved (every change is written at once; journal folded into the database file)".into()
+        })
+    }
+    fn close(&mut self) {
+        self.sel = None;
+        self.sel_cta = None;
+        self.detail = None;
+    }
+    fn preferences_view(&self) -> Option<usize> {
+        Some(V_SETTINGS)
+    }
+    fn info(&self) -> AppInfo {
+        AppInfo {
+            name: "GainCraft".into(),
+            version: gaincraft_core::VERSION.into(),
+            description: "Customer health for small B2B: explainable score, calls to action, renewals. Local, one SQLite file.".into(),
+            license: "MIT OR Apache-2.0".into(),
+            repository: "https://github.com/sandraschi/gaincraft".into(),
+            commit: env!("GAIN_COMMIT").into(),
+            built: env!("GAIN_BUILT").into(),
+            safety: "Every gaincraft and craft-biz crate is built with unsafe_code = forbid. Third-party crates (egui, wgpu, rusqlite with bundled SQLite) contain unsafe code of their own.".into(),
+            third_party: include_str!(concat!(env!("OUT_DIR"), "/third_party.tsv"))
+                .lines()
+                .filter_map(|l| {
+                    let mut it = l.split('\t');
+                    Some((
+                        it.next()?.to_string(),
+                        it.next()?.to_string(),
+                        it.next()?.to_string(),
+                    ))
+                })
+                .collect(),
+        }
+    }
+    fn docs(&self) -> Vec<Doc> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
+        vec![
+            Doc::embedded(
+                "README",
+                root.join("README.md"),
+                include_str!("../../../README.md"),
+            ),
+            Doc::embedded(
+                "HELP",
+                root.join("HELP.md"),
+                include_str!("../../../HELP.md"),
+            ),
+            Doc::embedded(
+                "PRD",
+                root.join("docs/PRD.md"),
+                include_str!("../../../docs/PRD.md"),
+            ),
+            Doc::embedded(
+                "Tiered plan",
+                root.join("docs/TIERED_PLAN.md"),
+                include_str!("../../../docs/TIERED_PLAN.md"),
+            ),
+            Doc::embedded(
+                "MCP tools",
+                root.join("docs/TOOLS.md"),
+                include_str!("../../../docs/TOOLS.md"),
+            ),
+            Doc::embedded(
+                "CHANGELOG",
+                root.join("CHANGELOG.md"),
+                include_str!("../../../CHANGELOG.md"),
+            ),
+            Doc::embedded(
+                "AGENTS",
+                root.join("AGENTS.md"),
+                include_str!("../../../AGENTS.md"),
+            ),
+        ]
+    }
+    fn extra_shortcuts(&self, de: bool) -> Vec<ShortcutRow> {
+        let g = if de { "Aufgaben-Board" } else { "CTA board" };
+        [
+            ("Pfeiltasten", "Arrows", "Karte wählen", "Select a card"),
+            (
+                "Ctrl+Links/Rechts",
+                "Ctrl+Left/Right",
+                "Karte in die Nachbarspalte (auf Erledigt: Lösen-Formular)",
+                "Move the card to the next column (onto Done: resolve form)",
+            ),
+            ("Enter", "Enter", "Karte öffnen", "Open the card"),
+        ]
+        .into_iter()
+        .map(|(kd, ke, wd, we)| {
+            (
+                g.to_string(),
+                if de { kd } else { ke }.to_string(),
+                if de { wd } else { we }.to_string(),
+            )
+        })
+        .collect()
     }
 }
 
@@ -2025,8 +2798,30 @@ fn main() -> std::process::ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use craft_biz_ui::app::Shell;
+    use craft_biz_ui::app::{Args, Shell};
+    use craft_biz_ui::help::Dialog;
+    use craft_biz_ui::menu::{self, Picked};
+    use egui_kittest::kittest::Queryable;
     use egui_kittest::Harness;
+
+    fn english(sh: Shell<GainApp>) -> Shell<GainApp> {
+        sh.with_args(&Args {
+            lang: Some("en".into()),
+            ..Args::default()
+        })
+    }
+
+    fn harness(sh: Shell<GainApp>) -> Harness<'static, Shell<GainApp>> {
+        let mut h = Harness::builder()
+            .with_size([1440.0, 900.0])
+            .build_ui_state(|ui, sh: &mut Shell<GainApp>| sh.show(ui), sh);
+        h.run_steps(3);
+        h
+    }
+
+    fn seats(sh: &Shell<GainApp>, k: &str) -> Option<i64> {
+        sh.app.ctx.gain.account(k).unwrap().seats
+    }
 
     fn shell(tag: &str) -> Shell<GainApp> {
         let dir = std::env::temp_dir().join(format!("gaincraft-app-{tag}-{}", std::process::id()));
@@ -2132,6 +2927,306 @@ mod tests {
             json!({ "set": { "adoption": 0.5, "recency": 0.3, "sentiment": 0.2 } }),
         );
         assert_eq!(sh.app.weights.adoption, 0.5);
+    }
+
+    #[test]
+    fn menu_bar_follows_the_craft_standard_in_both_languages() {
+        let sh = english(shell("menus"));
+        let titles: Vec<String> = sh.menus().iter().map(|m| m.title.clone()).collect();
+        assert_eq!(
+            titles,
+            ["File", "Edit", "View", "Insert", "Modify", "Commands", "Window", "Help"]
+        );
+        let help: Vec<String> = sh
+            .menus()
+            .last()
+            .unwrap()
+            .items
+            .iter()
+            .map(|i| i.label.clone())
+            .collect();
+        assert_eq!(
+            help,
+            [
+                "Command Palette...",
+                "Keyboard Shortcuts...",
+                "Project Files & Docs...",
+                "Licenses & Notices...",
+                "About GainCraft"
+            ]
+        );
+        // PRD items exist where the PRD puts them.
+        for path in [
+            ["File", "New Account..."],
+            ["File", "Import Usage CSV..."],
+            ["File", "Save"],
+            ["File", "Export Health Report..."],
+            ["File", "Close"],
+            ["File", "Quit"],
+            ["Edit", "Preferences..."],
+            ["View", "CTA Kanban Board"],
+            ["Insert", "Create Call-to-Action (CTA)"],
+            ["Modify", "Recompute Score"],
+            ["Commands", "Audit Churn Risk"],
+            ["Window", "Reset Layout"],
+        ] {
+            assert!(sh.menu_item(&path).is_some(), "missing {path:?}");
+        }
+        // Every tool item is a real tool with real argument names; no tofu (DE and EN).
+        let mut sh = sh;
+        let check = sh.menu_check().unwrap();
+        assert!(check["en"]["tool_items"].as_i64().unwrap() >= 14, "{check}");
+        assert_eq!(check["de"]["menus"][0], "Datei");
+        let all: Vec<&str> = COVERAGE.iter().map(|(t, _)| *t).collect();
+        assert!(all.contains(&"gain_churn_audit"));
+    }
+
+    #[test]
+    fn smoke_reports_status_and_menu_parity_without_a_window() {
+        let mut sh = shell("smoke");
+        let v = sh.smoke().unwrap();
+        assert_eq!(v["app"], "gaincraft");
+        assert_eq!(
+            v["menu_check"]["en"]["menus"].as_array().map(Vec::len),
+            Some(8)
+        );
+    }
+
+    #[test]
+    fn clicking_the_menu_bar_switches_on_hover_and_runs_commands() {
+        let mut h = harness(english(shell("click")));
+        // Help > About opens the dialog with the build facts; Esc closes it.
+        h.get_by_label("Help").click();
+        h.run_steps(2);
+        h.get_by_label("About GainCraft").click();
+        h.run_steps(3);
+        assert_eq!(h.state().help_open(), Some(Dialog::About));
+        assert!(h.query_by_label_contains("Version ").is_some());
+        h.key_press(Key::Escape);
+        h.run_steps(2);
+        assert_eq!(h.state().help_open(), None);
+        h.get_by_label("File").click();
+        h.run_steps(2);
+        assert!(
+            h.query_by_label_contains("New Account...").is_some(),
+            "File is open"
+        );
+        // switch_on_hover: with File open, hovering Commands opens Commands.
+        h.get_by_label("Commands").hover();
+        h.run_steps(3);
+        assert!(
+            h.query_by_label_contains("New Account...").is_none(),
+            "File closed"
+        );
+        h.get_by_label_contains("Audit Churn Risk").click();
+        h.run_steps(3);
+        assert!(
+            h.query_by_label_contains("Result: gain_churn_audit")
+                .is_some(),
+            "menu command ran through dispatch and shows its result"
+        );
+        assert!(h.state().last_error.is_none(), "{:?}", h.state().last_error);
+    }
+
+    #[test]
+    fn keyboard_shortcuts_reach_menu_items() {
+        let mut h = harness(english(shell("keys")));
+        h.key_press_modifiers(Modifiers::COMMAND, Key::N);
+        h.run_steps(2);
+        assert_eq!(h.state().palette().form_tool(), Some("gain_account_add"));
+        h.key_press(Key::Escape);
+        h.run_steps(2);
+        h.key_press(Key::F1);
+        h.run_steps(2);
+        assert_eq!(h.state().help_open(), Some(Dialog::Shortcuts));
+        assert!(
+            h.query_by_label_contains("Audit Churn Risk").is_some(),
+            "menu keys listed"
+        );
+        h.key_press(Key::Escape);
+        h.run_steps(2);
+        assert_eq!(h.state().help_open(), None);
+        h.key_press_modifiers(Modifiers::ALT, Key::Num3);
+        h.run_steps(2);
+        assert_eq!(h.state().view, V_COCKPIT);
+    }
+
+    #[test]
+    fn window_menu_toggles_panels_and_reset_restores_them() {
+        let mut sh = english(shell("layout"));
+        sh.trigger(Picked::Action("shell.toggle_nav".into()));
+        sh.trigger(Picked::Action("shell.toggle_status".into()));
+        let mut h = harness(sh);
+        assert!(!h.state().settings().layout.nav && !h.state().settings().layout.status);
+        assert!(h.query_by_label("Ready").is_none(), "status bar hidden");
+        h.state_mut()
+            .trigger(Picked::Action("shell.layout_reset".into()));
+        h.run_steps(2);
+        assert!(h.state().settings().layout.nav && h.state().settings().layout.status);
+    }
+
+    #[test]
+    fn undo_and_redo_reverse_edits_made_in_the_window() {
+        let mut sh = english(shell("undo"));
+        let k = "mockinger.example";
+        assert_eq!(seats(&sh, k), Some(5));
+        assert_eq!(sh.app.undo_label(), None);
+        sh.run_tool("gain_account_update", json!({ "account": k, "seats": 9 }));
+        assert_eq!(seats(&sh, k), Some(9));
+        assert!(sh.app.undo_label().unwrap().starts_with("edit "));
+        sh.trigger(Picked::Action("shell.undo".into()));
+        let mut h = harness(sh);
+        assert_eq!(seats(h.state(), k), Some(5), "undo through the Edit menu");
+        h.state_mut().trigger(Picked::Action("shell.redo".into()));
+        h.run_steps(2);
+        assert_eq!(seats(h.state(), k), Some(9), "redo");
+        let mut sh = english(shell("undo2"));
+        // Retire, then undo: active again, no churn date left behind.
+        sh.run_tool(
+            "gain_account_update",
+            json!({ "account": k, "active": false }),
+        );
+        assert!(!sh.app.ctx.gain.account(k).unwrap().active);
+        sh.app.undo().unwrap();
+        let a = sh.app.ctx.gain.account(k).unwrap();
+        assert_eq!((a.active, a.retired_on), (true, None));
+        // Triage set, then undo: cleared again.
+        sh.run_tool(
+            "gain_triage_set",
+            json!({ "account": k, "modifier": 0.9, "reason": "champion left in October" }),
+        );
+        let id = sh.app.ctx.gain.account(k).unwrap().id;
+        assert!(sh.app.ctx.gain.triage(id, sh.app.today).unwrap().is_some());
+        sh.app.undo().unwrap();
+        assert!(sh.app.ctx.gain.triage(id, sh.app.today).unwrap().is_none());
+        // Add, undo (inactive, no churn date), redo (active again, same key).
+        sh.run_tool("gain_account_add", json!({ "name": "Joe Mocky KG" }));
+        sh.app.undo().unwrap();
+        let a = sh.app.ctx.gain.account("joe-mocky-kg").unwrap();
+        assert_eq!((a.active, a.retired_on), (false, None));
+        sh.app.redo().unwrap();
+        assert!(sh.app.ctx.gain.account("joe-mocky-kg").unwrap().active);
+        // Records are not undoable: a resolved CTA stays resolved.
+        let before = sh.app.undo.len();
+        let cta = sh.app.open_ctas().next().map(|c| c.id).unwrap();
+        sh.run_tool("gain_cta_resolve", json!({ "id": cta, "note": "called" }));
+        assert_eq!(sh.app.undo.len(), before);
+    }
+
+    #[test]
+    fn edit_menu_select_all_and_cut_act_on_the_focused_field() {
+        let mut h = harness(english(shell("edit")));
+        let field = h.get_by_role(egui::accesskit::Role::TextInput);
+        field.click();
+        h.run_steps(1);
+        h.get_by_role(egui::accesskit::Role::TextInput)
+            .type_text("mock");
+        h.run_steps(2);
+        // Open Edit with the mouse: the field loses focus, the shell remembers it.
+        h.get_by_label("Edit").click();
+        h.run_steps(2);
+        h.get_by_label_contains("Select All").click();
+        h.run_steps(3);
+        let id = h.ctx.memory(|m| m.focused()).unwrap();
+        let sel = egui::TextEdit::load_state(&h.ctx, id)
+            .and_then(|s| s.cursor.char_range())
+            .unwrap();
+        assert_eq!(
+            (
+                sel.primary.index.0.min(sel.secondary.index.0),
+                sel.primary.index.0.max(sel.secondary.index.0)
+            ),
+            (0, 4),
+            "Select All selected the whole field"
+        );
+        // Opening the menu again takes focus and collapses the selection; the
+        // shell restores both before cutting.
+        h.get_by_label("Edit").click();
+        h.run_steps(2);
+        h.get_by_label_contains("Cut").click();
+        // The clipboard command is in the output of one frame: check each.
+        let mut copied = false;
+        for _ in 0..4 {
+            h.run_steps(1);
+            copied |= h
+                .output()
+                .platform_output
+                .commands
+                .iter()
+                .any(|c| matches!(c, egui::OutputCommand::CopyText(t) if t == "mock"));
+        }
+        assert!(copied, "Edit > Cut put the selected text on the clipboard");
+        assert_eq!(
+            h.get_by_role(egui::accesskit::Role::TextInput)
+                .value()
+                .as_deref(),
+            Some(""),
+            "and removed it from the field"
+        );
+    }
+
+    #[test]
+    fn cta_titles_are_german_in_the_german_window() {
+        let sh = shell("de");
+        let drop = sh
+            .app
+            .ctas
+            .iter()
+            .find(|c| c.kind == "adoption_drop")
+            .unwrap();
+        let de = cta_title(drop, true);
+        assert!(de.starts_with("Nutzung ") && de.contains('%'), "{de}");
+        assert_eq!(
+            cta_title(drop, false),
+            drop.title,
+            "English keeps the core title"
+        );
+        let renewal = sh.app.ctas.iter().find(|c| c.kind == "renewal").unwrap();
+        assert_eq!(
+            cta_title(renewal, true),
+            "Kündigungsfrist 30.11.2026: Verlängerung sichern"
+        );
+    }
+
+    #[test]
+    fn month_ends_and_the_twelve_month_trend() {
+        let d = |y, m, dd| NaiveDate::from_ymd_opt(y, m, dd).unwrap();
+        assert_eq!(month_end(d(2026, 11, 12), 0), d(2026, 11, 12));
+        assert_eq!(month_end(d(2026, 11, 12), 1), d(2026, 10, 31));
+        assert_eq!(month_end(d(2026, 11, 12), 11), d(2025, 12, 31));
+        assert_eq!(month_end(d(2026, 3, 15), 1), d(2026, 2, 28));
+        let mut sh = shell("months");
+        sh.app.today = d(2026, 11, 9);
+        sh.app.select("mock-software.example");
+        let m = &sh.app.detail.as_ref().unwrap().monthly;
+        assert_eq!(m.len(), 12);
+        assert!(
+            m[0].1.is_none(),
+            "a year ago: no usage data, not a fake low score"
+        );
+        assert_eq!(m[11].1.map(|x| x.1), Some("green"), "{m:?}");
+    }
+
+    #[test]
+    fn licenses_list_comes_from_cargo_lock() {
+        let sh = shell("lic");
+        let info = sh.app.info();
+        assert!(
+            info.third_party
+                .iter()
+                .any(|(n, _, l)| n == "egui" && l.contains("MIT")),
+            "{:?}",
+            &info.third_party[..info.third_party.len().min(5)]
+        );
+        assert!(info.third_party.iter().any(|(n, _, _)| n == "rusqlite"));
+        assert!(!info.commit.is_empty() && info.built.len() == 10);
+        assert_eq!(sh.app.docs().len(), 7);
+        assert!(sh
+            .app
+            .docs()
+            .iter()
+            .all(|d| d.text.is_some_and(|t| !t.is_empty())));
+        let _ = menu::leaves(&sh.menus());
     }
 
     #[test]

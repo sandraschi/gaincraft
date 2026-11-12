@@ -267,3 +267,128 @@ fn ctas_open_once_and_need_a_note() {
     );
     assert_eq!(g.ctas(None, true).unwrap().len(), 2);
 }
+
+fn temp_dir(tag: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("gaincraft-store-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+#[test]
+fn v1_database_migrates_in_place_and_keeps_its_rows() {
+    let dir = temp_dir("migrate");
+    let path = dir.join("v1.db");
+    {
+        // A database exactly as gaincraft 0.2.0 left it.
+        let c = Connection::open(&path).unwrap();
+        c.execute_batch(SCHEMA).unwrap();
+        c.execute_batch(
+            "INSERT INTO meta (key, value) VALUES ('schema_version', '1');
+             INSERT INTO accounts (key, name, created_at) VALUES ('old', 'Old Customer', '2026-01-01T00:00:00Z');
+             INSERT INTO ctas (account_id, kind, reference, title, status, created_on, last_seen) VALUES (1, 'low_health', '', 'Health 20 (red)', 'open', '2026-11-01', '2026-11-01');",
+        )
+        .unwrap();
+    }
+    let g = Gain::open(&path).unwrap();
+    assert_eq!(g.meta("schema_version").unwrap().as_deref(), Some("2"));
+    let a = g.account("old").unwrap();
+    assert_eq!(a.retired_on, None);
+    let c = g.ctas(None, false).unwrap();
+    assert_eq!(c.len(), 1);
+    assert_eq!(c[0].params, "{}", "old CTAs get an empty params object");
+    drop(g);
+    // Opening again is a no-op, and a newer schema is refused.
+    let g = Gain::open(&path).unwrap();
+    g.set_meta("schema_version", "99").unwrap();
+    drop(g);
+    assert!(Gain::open(&path).is_err());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn retiring_sets_a_churn_date_and_reactivating_clears_it() {
+    let g = gain();
+    let a = g
+        .update_account(
+            "mock-software-gmbh",
+            &AccountPatch {
+                active: Some(false),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert!(!a.active);
+    assert_eq!(a.retired_on, Some(Utc::now().date_naive()));
+    let a = g
+        .update_account(
+            "mock-software-gmbh",
+            &AccountPatch {
+                retired_on: Some(Some(d(2026, 6, 30))),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(a.retired_on, Some(d(2026, 6, 30)), "backdated churn");
+    let a = g
+        .update_account(
+            "mock-software-gmbh",
+            &AccountPatch {
+                active: Some(true),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!((a.active, a.retired_on), (true, None));
+    assert!(
+        g.update_account(
+            "mock-software-gmbh",
+            &AccountPatch {
+                retired_on: Some(Some(d(2026, 6, 30))),
+                ..Default::default()
+            },
+        )
+        .is_err(),
+        "an active account cannot carry a churn date"
+    );
+}
+
+#[test]
+fn cta_params_are_stored_and_manual_refs_are_unique() {
+    let g = gain();
+    let a = g.account("mock-software-gmbh").unwrap();
+    let today = d(2026, 11, 12);
+    let r1 = g.next_manual_ref().unwrap();
+    assert!(g
+        .raise_cta_with(
+            a.id,
+            "manual",
+            &r1,
+            "Call about the API",
+            r#"{"note":"x"}"#,
+            None,
+            today
+        )
+        .unwrap());
+    let r2 = g.next_manual_ref().unwrap();
+    assert_ne!(r1, r2);
+    let c = g.ctas(Some(a.id), false).unwrap();
+    assert_eq!(c[0].params, r#"{"note":"x"}"#);
+    assert!(g
+        .raise_cta_with(a.id, "manual", &r2, "  ", "{}", None, today)
+        .is_err());
+}
+
+#[test]
+fn backup_writes_a_readable_copy_and_never_overwrites() {
+    let dir = temp_dir("backup");
+    let g = gain();
+    let out = dir.join("copy.db");
+    let bytes = g.backup_to(&out).unwrap();
+    assert!(bytes > 0);
+    let copy = Gain::open(&out).unwrap();
+    assert_eq!(copy.accounts(true).unwrap().len(), 1);
+    assert!(g.backup_to(&out).is_err(), "existing file is refused");
+    drop(copy);
+    let _ = std::fs::remove_dir_all(dir);
+}

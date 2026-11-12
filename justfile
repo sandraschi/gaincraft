@@ -23,3 +23,15 @@ build-release:
     $env:Path = "$env:USERPROFILE\\.cargo\\bin;$env:Path"; cargo build --release --workspace
 
 ci: check test fmt-check
+
+# Headless window check: status tool, menu parity, tofu guard (throwaway database).
+smoke:
+    $env:Path = "$env:USERPROFILE\\.cargo\\bin;$env:Path"; cargo run -q -p gaincraft-app -- --smoke --db (Join-Path $env:TEMP 'gaincraft-smoke.db')
+
+# Build and stage dist/ (plain exes, NSIS installer, mcpb, launcher zip, SHA256SUMS). Nothing is published.
+release-dry:
+    powershell -NoProfile -ExecutionPolicy Bypass -File scripts/release.ps1
+
+# Same, then tag, push the tag and upload to GitHub (clean, pushed main required).
+release:
+    powershell -NoProfile -ExecutionPolicy Bypass -File scripts/release.ps1 -Publish

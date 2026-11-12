@@ -329,3 +329,289 @@ fn every_tool_parses_its_minimal_arguments() {
         );
     }
 }
+
+fn out_dir(tag: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("gaincraft-out-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+#[test]
+fn manual_cta_opens_with_a_unique_reference_and_resolves_like_any_other() {
+    let mut c = ctx("manual-cta");
+    run(&mut c, "gain_demo_seed", json!({})).unwrap();
+    let a = run(
+        &mut c,
+        "gain_cta_add",
+        json!({ "account": "mockinger.example", "title": "Send the webshop post-mortem", "due": "20.11.2026", "note": "promised in the call" }),
+    )
+    .unwrap();
+    let b = run(
+        &mut c,
+        "gain_cta_add",
+        json!({ "account": "mockinger.example", "title": "Second follow-up" }),
+    )
+    .unwrap();
+    assert_eq!(a["kind"], "manual");
+    assert_ne!(
+        a["reference"], b["reference"],
+        "two manual CTAs, two references"
+    );
+    assert_eq!(a["due"], "2026-11-20");
+    assert!(a["params"]
+        .as_str()
+        .unwrap()
+        .contains("promised in the call"));
+    assert!(run(
+        &mut c,
+        "gain_cta_add",
+        json!({ "account": "mockinger.example", "title": " " })
+    )
+    .is_err());
+    let r = run(
+        &mut c,
+        "gain_cta_resolve",
+        json!({ "id": a["id"], "note": "sent on Friday" }),
+    )
+    .unwrap();
+    assert_eq!(r["status"], "resolved");
+}
+
+#[test]
+fn generated_ctas_carry_their_values_for_translation() {
+    let mut c = ctx("cta-params");
+    run(&mut c, "gain_demo_seed", json!({})).unwrap();
+    let ctas = c.gain.ctas(None, false).unwrap();
+    let drop = ctas.iter().find(|x| x.kind == "adoption_drop").unwrap();
+    let p: Value = serde_json::from_str(&drop.params).unwrap();
+    assert!(p["pct"].as_i64().unwrap() > 40, "{p}");
+    assert!(drop.title.contains(&format!("{}%", p["pct"])));
+    let renewal = ctas.iter().find(|x| x.kind == "renewal").unwrap();
+    let p: Value = serde_json::from_str(&renewal.params).unwrap();
+    assert_eq!(p["date"], "30.11.2026");
+}
+
+#[test]
+fn export_writes_csv_and_markdown_worst_first_and_does_not_overwrite() {
+    let mut c = ctx("export");
+    run(&mut c, "gain_demo_seed", json!({})).unwrap();
+    let dir = out_dir("export");
+    let csv = dir.join("health.csv");
+    let r = run(
+        &mut c,
+        "gain_export",
+        json!({ "path": csv.to_string_lossy(), "as_of": "09.11.2026" }),
+    )
+    .unwrap();
+    assert_eq!(
+        (r["format"].as_str(), r["rows"].as_i64()),
+        (Some("csv"), Some(3))
+    );
+    let text = std::fs::read_to_string(&csv).unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    assert!(lines[0].starts_with("account;name;owner;score;band"));
+    assert!(
+        lines[1].starts_with("hannes-mockinger"),
+        "worst first: {text}"
+    );
+    assert!(lines[1].contains(";red;"), "{text}");
+    assert!(lines[1].contains("5.400,00"), "DE money: {text}");
+    assert!(
+        !text.to_lowercase().contains("user"),
+        "no per-person data in the report"
+    );
+    assert!(
+        run(
+            &mut c,
+            "gain_export",
+            json!({ "path": csv.to_string_lossy() })
+        )
+        .is_err(),
+        "existing file needs overwrite"
+    );
+    run(
+        &mut c,
+        "gain_export",
+        json!({ "path": csv.to_string_lossy(), "overwrite": true }),
+    )
+    .unwrap();
+    let md = dir.join("health.md");
+    run(
+        &mut c,
+        "gain_export",
+        json!({ "path": md.to_string_lossy(), "as_of": "09.11.2026" }),
+    )
+    .unwrap();
+    let text = std::fs::read_to_string(&md).unwrap();
+    assert!(text.starts_with("# gaincraft health report"));
+    assert!(text.contains("| Hannes Mockinger e.U. (DEMO) |"), "{text}");
+    assert!(run(
+        &mut c,
+        "gain_export",
+        json!({ "path": dir.join("x.pdf").to_string_lossy() })
+    )
+    .is_err());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn export_and_backup_respect_confinement() {
+    let mut c = ctx("confine");
+    c.confinement = Confinement(Some(Vec::new()));
+    let dir = out_dir("confine");
+    for tool in ["gain_export", "gain_backup"] {
+        let err = run(
+            &mut c,
+            tool,
+            json!({ "path": dir.join("x.csv").to_string_lossy() }),
+        )
+        .unwrap_err();
+        assert!(err.contains("allow-path"), "{tool}: {err}");
+    }
+    c.confinement = Confinement(None);
+    let b = run(
+        &mut c,
+        "gain_backup",
+        json!({ "path": dir.join("copy.db").to_string_lossy() }),
+    )
+    .unwrap();
+    assert!(b["bytes"].as_i64().unwrap() > 0);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn inbox_handles_positive_signals_amendments_and_terminations() {
+    let mut c = ctx("inbox-more");
+    run(&mut c, "gain_demo_seed", json!({})).unwrap();
+    c.bus
+        .emit(
+            "formcraft",
+            APP,
+            "signal.positive",
+            json!({ "account": "mock-software.example", "score": 8, "response_id": "R-1", "subject": "NPS 10" }),
+        )
+        .unwrap();
+    c.bus
+        .emit(
+            "contractcraft",
+            APP,
+            "contract.amended",
+            json!({ "contract_id": "C-2026-001", "annual_value_cents": 1_200_000, "term_end": "2028-02-29" }),
+        )
+        .unwrap();
+    c.bus
+        .emit(
+            "contractcraft",
+            APP,
+            "contract.amended",
+            json!({ "contract_id": "C-9999", "annual_value_cents": 1 }),
+        )
+        .unwrap();
+    let r = run(&mut c, "gain_inbox_drain", json!({})).unwrap();
+    assert_eq!(r["applied"].as_array().unwrap().len(), 2, "{r}");
+    assert_eq!(
+        r["rejected"].as_array().unwrap().len(),
+        1,
+        "unknown contract: {r}"
+    );
+    let a = c.gain.account("mock-software.example").unwrap();
+    assert_eq!(a.arr_cents, Some(1_200_000));
+    assert_eq!(a.term_end, Some(d("2028-02-29")));
+    assert_eq!(
+        a.last_notice,
+        Some(d("2026-11-30")),
+        "untouched field stays"
+    );
+    let pos = c.gain.signals(Some(a.id), None).unwrap();
+    assert!(pos
+        .iter()
+        .any(|s| s.polarity == "positive" && s.source == "formcraft"));
+
+    // Termination: renewal CTA dismissed, termination CTA opened, no notice date.
+    assert!(c
+        .gain
+        .ctas(Some(a.id), false)
+        .unwrap()
+        .iter()
+        .any(|x| x.kind == "renewal"));
+    c.bus
+        .emit(
+            "contractcraft",
+            APP,
+            "contract.terminated",
+            json!({ "contract_id": "C-2026-001", "effective": "28.02.2027", "reason": "moved to a competitor" }),
+        )
+        .unwrap();
+    let r = run(&mut c, "gain_inbox_drain", json!({})).unwrap();
+    assert_eq!(r["applied"].as_array().unwrap().len(), 1, "{r}");
+    let a = c.gain.account("mock-software.example").unwrap();
+    assert_eq!((a.last_notice, a.term_end), (None, Some(d("2027-02-28"))));
+    assert!(a.active, "still a customer until a person retires it");
+    let open = c.gain.ctas(Some(a.id), false).unwrap();
+    assert!(!open.iter().any(|x| x.kind == "renewal"), "{open:?}");
+    let t = open.iter().find(|x| x.kind == "termination").unwrap();
+    assert!(t.title.contains("28.02.2027") && t.params.contains("competitor"));
+}
+
+#[test]
+fn churn_audit_flags_risk_and_backtests_retired_accounts() {
+    let mut c = ctx("audit");
+    run(&mut c, "gain_demo_seed", json!({})).unwrap();
+    let r = run(&mut c, "gain_churn_audit", json!({ "as_of": "09.11.2026" })).unwrap();
+    assert_eq!(r["backtest"]["churned"], 0);
+    assert!(r["backtest"]["verdict"]
+        .as_str()
+        .unwrap()
+        .contains("nothing to backtest"));
+    let risk = r["risk"].as_array().unwrap();
+    assert_eq!(risk[0]["account"], "hannes-mockinger-e.u.-demo", "{r}");
+    assert_eq!(risk[0]["at_risk"], true);
+    let bird = risk
+        .iter()
+        .find(|x| x["account"] == "mockingbird-inc.-demo")
+        .unwrap();
+    assert!(
+        bird["reasons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|x| x.as_str().unwrap().contains("30 days")),
+        "dropping account shows the drop: {bird}"
+    );
+
+    // Mockinger churns on 09.11.2026; 14 days before, was it already the worst?
+    run(
+        &mut c,
+        "gain_account_update",
+        json!({ "account": "mockinger.example", "active": false, "retired_on": "09.11.2026" }),
+    )
+    .unwrap();
+    let r = run(
+        &mut c,
+        "gain_churn_audit",
+        json!({ "as_of": "09.11.2026", "lead_days": 14 }),
+    )
+    .unwrap();
+    let b = &r["backtest"];
+    assert_eq!(b["churned"], 1, "{r}");
+    let m = &b["accounts"][0];
+    assert_eq!(
+        (m["rank"].as_i64(), m["of"].as_i64()),
+        (Some(1), Some(3)),
+        "{m}"
+    );
+    assert_eq!(m["flagged"], true, "{m}");
+    assert!(
+        b["verdict"].as_str().unwrap().contains("Too few"),
+        "honest about n=1"
+    );
+    assert!(
+        !r["risk"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|x| x["account"] == "hannes-mockinger-e.u.-demo"),
+        "retired accounts are not in the live risk list"
+    );
+}

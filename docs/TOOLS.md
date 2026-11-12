@@ -9,7 +9,7 @@ is out of date. Every tool is also a CLI verb (`gaincraft --help`). Dotted names
 | `gain_account_add` | Add a customer account. Domain links signals from deskcraft (mail domain). | `name` | `arr`, `domain`, `key`, `notes`, `owner`, `seats` |
 | `gain_account_list` | Accounts with ARR, seats, contract dates. | - | `include_inactive` |
 | `gain_account_show` | One account with current health and components, score trend, signals, open CTAs and triage. | `account` | `as_of` |
-| `gain_account_update` | Change account fields; null clears. active=false retires an account. | `account` | `active`, `arr`, `contract_id`, `domain`, `last_notice`, `name`, `notes`, `owner`, `renewal_months`, `seats`, `term_end` |
+| `gain_account_update` | Change account fields; null clears. active=false retires an account. | `account` | `active`, `arr`, `contract_id`, `domain`, `last_notice`, `name`, `notes`, `owner`, `renewal_months`, `retired_on`, `seats`, `term_end` |
 | `gain_telemetry_import` | Import usage aggregates per account and day: account;date;active_users[;sessions;key_actions]. Per-person columns are refused (ArbVG / DSGVO). Re-importing a day replaces it. | `path` | `dry_run` |
 | `gain_signal_add` | Record a customer signal by hand (e.g. after a call): negative or positive, score 1-10, with a note. | `account`, `score`, `note` | `date`, `polarity`, `reference` |
 | `gain_health` | Health score 0-100 of one account with components (adoption, recency, sentiment, modifier); stores a snapshot and raises CTAs. | `account` | `as_of` |
@@ -19,5 +19,9 @@ is out of date. Every tool is also a CLI verb (`gaincraft --help`). Dotted names
 | `gain_cta_resolve` | Resolve (or dismiss) a CTA with a note saying what was done. | `id`, `note` | `dismiss` |
 | `gain_deadlines` | Notice deadlines and term ends of accounts within N days (default 90). | - | `as_of`, `within_days` |
 | `gain_weights` | Show or set the health weights (adoption, recency, sentiment; must sum to 1). | - | `set` |
-| `gain_inbox_drain` | Apply events from other craft apps: contractcraft contract.executed (ARR, contract dates) and deskcraft/formcraft signal.negative (sentiment). Unknown accounts are created and flagged. | - | - |
+| `gain_inbox_drain` | Apply events from other craft apps: contractcraft contract.executed / contract.amended / contract.terminated (ARR, contract dates, exit CTA) and deskcraft/formcraft signal.negative / signal.positive (sentiment). Unknown accounts are created and flagged. | - | - |
 | `gain_demo_seed` | Fill an EMPTY database with three labelled demo accounts (healthy, dropping, fading) whose names match the other craft demos. | - | - |
+| `gain_cta_add` | Create a call to action by hand (kind manual), e.g. a follow-up agreed in a call. | `account`, `title` | `due`, `note` |
+| `gain_export` | Write the health report of all active accounts (worst first) as CSV (; and DE numbers) or Markdown. Format from the extension unless given. | `path` | `as_of`, `format`, `overwrite` |
+| `gain_backup` | Copy the whole database to a new file (consistent snapshot). Never overwrites. | `path` | - |
+| `gain_churn_audit` | Churn-risk audit: accounts at risk now with reasons (band, 30-day drop, notice soon, sentiment), and a backtest of retired accounts: how the score ranked them lead_days before they left. | - | `as_of`, `lead_days` |

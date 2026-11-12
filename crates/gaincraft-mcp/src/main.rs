@@ -22,6 +22,8 @@ const AFTER_HELP: &str = "Typical week:
   gaincraft cta                                 # what to do this week
   gaincraft cta-done 4 --note \"Call booked\"
   gaincraft deadlines --days 90                 # notice dates before they pass
+  gaincraft audit                               # who is at risk and why; backtest of churned accounts
+  gaincraft export D:\\Reports\\health.md        # report for the team (csv or md)
 See HELP.md for workflows and docs/TOOLS.md for every MCP tool.";
 
 #[derive(Parser)]
@@ -96,9 +98,12 @@ enum Cmd {
         last_notice: Option<String>,
         #[arg(long)]
         notes: Option<String>,
-        /// Retire the account.
+        /// Retire the account (churned). Sets the churn date to today unless --retired-on.
         #[arg(long)]
         retire: bool,
+        /// Churn date for a retired account (DD.MM.YYYY), used by `audit`.
+        #[arg(long)]
+        retired_on: Option<String>,
     },
     /// Import aggregate usage CSV.
     Import {
@@ -174,6 +179,38 @@ enum Cmd {
         recency: Option<f64>,
         #[arg(long)]
         sentiment: Option<f64>,
+    },
+    /// Create a call to action by hand.
+    CtaAdd {
+        account: String,
+        #[arg(long)]
+        title: String,
+        /// Due date (DD.MM.YYYY).
+        #[arg(long)]
+        due: Option<String>,
+        #[arg(long)]
+        note: Option<String>,
+    },
+    /// Write the health report as CSV or Markdown (format from the extension).
+    Export {
+        path: String,
+        /// csv or md
+        #[arg(long)]
+        format: Option<String>,
+        #[arg(long)]
+        as_of: Option<String>,
+        #[arg(long)]
+        overwrite: bool,
+    },
+    /// Copy the database to a new file.
+    Backup { path: String },
+    /// Churn-risk audit and backtest of retired accounts.
+    Audit {
+        #[arg(long)]
+        as_of: Option<String>,
+        /// Days before the churn date to score retired accounts (7-365, default 90).
+        #[arg(long)]
+        lead_days: Option<i64>,
     },
     /// Apply events from contractcraft, deskcraft, formcraft.
     InboxDrain,
@@ -259,6 +296,7 @@ fn to_tool(cmd: Cmd) -> Result<(&'static str, Value), String> {
             last_notice,
             notes,
             retire,
+            retired_on,
         } => (
             "gain_account_update",
             obj(vec![
@@ -272,7 +310,15 @@ fn to_tool(cmd: Cmd) -> Result<(&'static str, Value), String> {
                 ("term_end", os(term_end)),
                 ("last_notice", os(last_notice)),
                 ("notes", os(notes)),
-                ("active", if retire { Some(json!(false)) } else { None }),
+                (
+                    "active",
+                    if retire || retired_on.is_some() {
+                        Some(json!(false))
+                    } else {
+                        None
+                    },
+                ),
+                ("retired_on", os(retired_on)),
             ]),
         ),
         Cmd::Import { path, dry_run } => (
@@ -352,6 +398,39 @@ fn to_tool(cmd: Cmd) -> Result<(&'static str, Value), String> {
                 )
             }
         },
+        Cmd::CtaAdd {
+            account,
+            title,
+            due,
+            note,
+        } => (
+            "gain_cta_add",
+            obj(vec![
+                ("account", sv(&account)),
+                ("title", sv(&title)),
+                ("due", os(due)),
+                ("note", os(note)),
+            ]),
+        ),
+        Cmd::Export {
+            path,
+            format,
+            as_of,
+            overwrite,
+        } => (
+            "gain_export",
+            obj(vec![
+                ("path", sv(&path)),
+                ("format", os(format)),
+                ("as_of", os(as_of)),
+                ("overwrite", Some(json!(overwrite))),
+            ]),
+        ),
+        Cmd::Backup { path } => ("gain_backup", json!({ "path": path })),
+        Cmd::Audit { as_of, lead_days } => (
+            "gain_churn_audit",
+            obj(vec![("as_of", os(as_of)), ("lead_days", oi(lead_days))]),
+        ),
         Cmd::InboxDrain => ("gain_inbox_drain", json!({})),
         Cmd::DemoSeed => ("gain_demo_seed", json!({})),
         Cmd::Tools { .. } | Cmd::Mcp => return Err("not a tool verb".into()),
@@ -424,6 +503,8 @@ const COLUMN_ORDER: &[&str] = &[
 ];
 const HIDDEN: &[&str] = &[
     "account_id",
+    "arr_cents",
+    "params",
     "auto_created",
     "renewal_months",
     "notes",
@@ -542,7 +623,28 @@ fn render(v: &Value) -> String {
         }
         return out;
     }
-    const LISTS: [&str; 5] = ["rows", "accounts", "ctas", "applied", "rejected"];
+    if let (Some(risk), Some(bt)) = (
+        obj.get("risk").and_then(Value::as_array),
+        obj.get("backtest").filter(|b| b.is_object()),
+    ) {
+        let mut out = format!(
+            "as of {}  at risk {}  ARR at risk {}\n\n{}",
+            scalar(&obj["as_of"]),
+            scalar(&obj["at_risk"]),
+            scalar(&obj["arr_at_risk"]),
+            table(risk)
+        );
+        out.push_str(&format!(
+            "\nbacktest ({} days before churn): {}\n",
+            scalar(&obj["lead_days"]),
+            scalar(&bt["verdict"])
+        ));
+        if let Some(rows) = bt["accounts"].as_array().filter(|r| !r.is_empty()) {
+            out.push_str(&table(rows));
+        }
+        return out;
+    }
+    const LISTS: [&str; 6] = ["rows", "accounts", "ctas", "risk", "applied", "rejected"];
     let lists: Vec<&str> = LISTS
         .iter()
         .copied()
@@ -690,7 +792,7 @@ mod tests {
         assert_eq!(init["result"]["serverInfo"]["name"], "gaincraft");
         let list =
             handle_line(&mut h, r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#).unwrap();
-        assert_eq!(list["result"]["tools"].as_array().map(Vec::len), Some(16));
+        assert_eq!(list["result"]["tools"].as_array().map(Vec::len), Some(20));
         let seed = handle_line(&mut h, r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"gain_demo_seed","arguments":{}}}"#).unwrap();
         assert_eq!(seed["result"]["isError"], false, "{seed}");
         let show = handle_line(&mut h, r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"gain.account_show","arguments":{"account":"mockinger.example","as_of":"09.11.2026"}}}"#).unwrap();
@@ -745,6 +847,39 @@ mod tests {
                 recency: None,
                 sentiment: None,
             },
+            Cmd::CtaAdd {
+                account: "a".into(),
+                title: "t".into(),
+                due: Some("20.11.2026".into()),
+                note: None,
+            },
+            Cmd::Export {
+                path: "r.md".into(),
+                format: None,
+                as_of: None,
+                overwrite: false,
+            },
+            Cmd::Backup {
+                path: "copy.db".into(),
+            },
+            Cmd::Audit {
+                as_of: None,
+                lead_days: Some(30),
+            },
+            Cmd::Update {
+                account: "a".into(),
+                name: None,
+                domain: None,
+                owner: None,
+                arr: None,
+                seats: None,
+                contract: None,
+                term_end: None,
+                last_notice: None,
+                notes: None,
+                retire: false,
+                retired_on: Some("30.06.2026".into()),
+            },
             Cmd::InboxDrain,
             Cmd::DemoSeed,
         ];
@@ -772,6 +907,54 @@ mod tests {
             docs_in_sync(committed, &tools_markdown(APP, &tools())),
             "docs/TOOLS.md is stale: run `just docs`"
         );
+    }
+
+    #[test]
+    fn mcpb_manifest_lists_exactly_the_catalog() {
+        let m: Value = serde_json::from_str(include_str!("../../../mcpb/manifest.json")).unwrap();
+        let mut listed: Vec<String> = m["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap().to_string())
+            .collect();
+        let mut catalog: Vec<String> = tools()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap().to_string())
+            .collect();
+        listed.sort();
+        catalog.sort();
+        assert_eq!(listed, catalog, "update mcpb/manifest.json");
+        assert_eq!(m["server"]["entry_point"], "gaincraft.exe");
+    }
+
+    #[test]
+    fn every_tool_has_a_cli_verb() {
+        // Each tool is reachable from the CLI (AGENTS.md: every tool is also a verb).
+        let src = include_str!("main.rs");
+        let start = src.find("fn to_tool(").unwrap_or(0);
+        let end = src.find("struct Host").unwrap_or(src.len());
+        let body = &src[start..end];
+        for t in tools() {
+            let name = t["name"].as_str().unwrap_or_default();
+            assert!(
+                body.contains(&format!("\"{name}\"")),
+                "no CLI verb maps to {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn render_audit_shows_risk_and_verdict() {
+        let v = json!({ "as_of": "2026-11-09", "at_risk": 1, "arr_at_risk": "5.400,00", "lead_days": 90,
+            "risk": [{ "account": "m", "score": 20, "band": "red", "reasons": ["band red"], "arr_cents": 540000 }],
+            "backtest": { "verdict": "No retired accounts", "accounts": [] } });
+        let s = render(&v);
+        assert!(
+            s.contains("band red") && s.contains("No retired accounts"),
+            "{s}"
+        );
+        assert!(!s.contains("540000"), "cents column hidden: {s}");
     }
 
     #[test]
