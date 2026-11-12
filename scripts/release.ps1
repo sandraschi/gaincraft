@@ -35,7 +35,11 @@ param(
     [switch]$Publish
 )
 
-$ErrorActionPreference = 'Stop'
+# Native tools (cargo, git, makensis, bunx) are judged by their exit code (Need). EAP stays
+# Continue because Windows PowerShell 5.1 turns their stderr progress lines into error
+# records when output is redirected (a log file, a scheduler), and Stop would abort the
+# release on the first "Compiling ..." line. Cmdlets that must not fail pass -ErrorAction Stop.
+$ErrorActionPreference = 'Continue'
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 $RepoName = 'gaincraft'
 $Dist = Join-Path $RepoRoot 'dist'
@@ -72,10 +76,7 @@ if (git tag --list $Tag) { Fail "tag $Tag already exists locally; bump the works
 if ($Publish) {
     if (-not (Get-Command gh -ErrorAction SilentlyContinue)) { Fail 'gh CLI not found' }
     if (git ls-remote --tags origin "refs/tags/$Tag") { Fail "tag $Tag already exists on the remote" }
-    $prevEap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
-    git fetch -q origin $Trunk 2>$null; $fetchCode = $LASTEXITCODE
-    $ErrorActionPreference = $prevEap
-    Need $fetchCode "git fetch origin $Trunk"
+    git fetch -q origin $Trunk 2>$null; Need $LASTEXITCODE "git fetch origin $Trunk"
     $ahead = git rev-list --count "origin/$Trunk..HEAD"
     if ($ahead -ne '0') { Fail "$ahead local commit(s) not pushed; push $Trunk first" }
 }
@@ -108,49 +109,51 @@ $smokeDb = Join-Path ([IO.Path]::GetTempPath()) "gaincraft-release-smoke-$PID.db
 $init = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"release-smoke","version":"0"}}}'
 $resp = $init | & $cli --db $smokeDb mcp | Select-Object -First 1
 if ($resp -notmatch '"result"') { Fail "MCP initialize returned no result: $resp" }
-Remove-Item "$smokeDb*" -Force -ErrorAction SilentlyContinue
+Remove-Item "$smokeDb*" -Force -ErrorAction SilentlyContinue  # best effort
 Write-Ok 'smoke: app (menu parity, tofu guard), cli status, MCP initialize'
 
 # ---- Phase 3: stage artifacts -----------------------------------------------
 Write-Phase 'Phase 3: artifacts'
-if (Test-Path $Dist) { Remove-Item $Dist -Recurse -Force }
-New-Item -ItemType Directory -Force $Dist | Out-Null
+if (Test-Path $Dist) { Remove-Item $Dist -Recurse -Force -ErrorAction Stop }
+New-Item -ItemType Directory -Force $Dist -ErrorAction Stop | Out-Null
 # Plain executables under stable names: releases/latest/download/gaincraft.exe is a fixed URL.
 $assets = @()
 foreach ($f in $app, $cli) {
     $dst = Join-Path $Dist (Split-Path -Leaf $f)
-    Copy-Item $f $dst
+    Copy-Item $f $dst -ErrorAction Stop
     Write-Ok "$(Split-Path -Leaf $f): $([math]::Round((Get-Item $dst).Length / 1MB, 1)) MB"
     $assets += $dst
 }
 if (-not $SkipInstaller) {
     $setup = Join-Path $Dist "$RepoName-$Version-setup.exe"
     & $makensis /V2 "/DPRODUCT_VERSION=$Version" "/DOUT_FILE=$setup" (Join-Path $RepoRoot 'installer\installer.nsi'); Need $LASTEXITCODE 'makensis'
+    if (-not (Test-Path $setup)) { Fail "makensis reported success but $setup is missing" }
     Write-Ok "installer: $(Split-Path -Leaf $setup), $([math]::Round((Get-Item $setup).Length / 1MB, 1)) MB"
     $assets += $setup
 }
 # Launcher-only extra (craft-launcher discovery): same two exes, never the sole download.
 $zip = Join-Path $Dist "$RepoName-$Version-windows-x64-portable.zip"
-Compress-Archive -Path $app, $cli -DestinationPath $zip -Force
+Compress-Archive -Path $app, $cli -DestinationPath $zip -Force -ErrorAction Stop
 Write-Ok "launcher zip (extra): $(Split-Path -Leaf $zip)"
 $assets += $zip
 if (-not $SkipMcpb) {
     $bunx = Join-Path $env:USERPROFILE '.bun\bin\bunx.exe'
     if (-not (Test-Path $bunx)) { $g = Get-Command bunx -ErrorAction SilentlyContinue; if ($g) { $bunx = $g.Source } else { Fail 'bunx not found' } }
     $mstage = Join-Path $Dist 'mcpb-stage'
-    New-Item -ItemType Directory -Force $mstage | Out-Null
-    $manifest = (Get-Content (Join-Path $RepoRoot 'mcpb\manifest.json') -Raw) -replace '__VERSION__', $Version
+    New-Item -ItemType Directory -Force $mstage -ErrorAction Stop | Out-Null
+    $manifest = (Get-Content (Join-Path $RepoRoot 'mcpb\manifest.json') -Raw -ErrorAction Stop) -replace '__VERSION__', $Version
     [IO.File]::WriteAllText((Join-Path $mstage 'manifest.json'), $manifest, (New-Object Text.UTF8Encoding $false))
-    Copy-Item $cli $mstage
+    Copy-Item $cli $mstage -ErrorAction Stop
     $mcpb = Join-Path $Dist "$RepoName-v$Version.mcpb"
     & $bunx '@anthropic-ai/mcpb' validate (Join-Path $mstage 'manifest.json'); Need $LASTEXITCODE 'mcpb validate manifest'
     & $bunx '@anthropic-ai/mcpb' pack $mstage $mcpb; Need $LASTEXITCODE 'mcpb pack'
-    Remove-Item $mstage -Recurse -Force
+    Remove-Item $mstage -Recurse -Force -ErrorAction Stop
+    if (-not (Test-Path $mcpb)) { Fail "mcpb pack reported success but $mcpb is missing" }
     Write-Ok "mcpb: $([math]::Round((Get-Item $mcpb).Length / 1MB, 1)) MB"
     $assets += $mcpb
 }
 
-$sums = foreach ($a in $assets) { "{0}  {1}" -f (Get-FileHash $a -Algorithm SHA256).Hash.ToLower(), (Split-Path -Leaf $a) }
+$sums = foreach ($a in $assets) { "{0}  {1}" -f (Get-FileHash $a -Algorithm SHA256 -ErrorAction Stop).Hash.ToLower(), (Split-Path -Leaf $a) }
 $sumFile = Join-Path $Dist 'SHA256SUMS.txt'
 [IO.File]::WriteAllText($sumFile, (($sums -join "`n") + "`n"), (New-Object Text.UTF8Encoding $false))
 $assets += $sumFile
