@@ -12,6 +12,7 @@ craft-biz.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 chrono.workspace = true
+rusqlite.workspace = true
 
 [lints]
 workspace = true

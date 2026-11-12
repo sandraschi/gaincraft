@@ -31,6 +31,7 @@
     { "name": "gain_account_show", "description": "One account with health components, trend, signals, open CTAs and triage." },
     { "name": "gain_account_update", "description": "Change account fields; active=false retires an account with a churn date." },
     { "name": "gain_telemetry_import", "description": "Import usage aggregates per account and day; per-person columns are refused." },
+    { "name": "gain_usage_pull", "description": "Pull aggregate usage straight from a SQLite product database (read-only SELECT); same privacy guard." },
     { "name": "gain_signal_add", "description": "Record a customer signal by hand." },
     { "name": "gain_health", "description": "Health score of one account; stores a snapshot and raises CTAs." },
     { "name": "gain_health_all", "description": "Health of all active accounts, worst first, ARR at risk." },

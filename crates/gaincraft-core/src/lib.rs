@@ -11,12 +11,20 @@ use craft_biz::mcp::tool;
 use craft_biz::Money;
 use gaincraft_store::{Account, AccountPatch, Day, Gain, GainError, NewAccount, NewSignal};
 use health::{Health, Weights};
+use rusqlite::{Connection, OpenFlags};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Instant;
 
 pub const APP: &str = "gaincraft";
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 const MAX_IMPORT_BYTES: u64 = 20 * 1024 * 1024;
+/// Most rows one usage pull may read from a product database.
+const MAX_PULL_ROWS: usize = 1_000_000;
+/// A product-database query that runs longer is interrupted.
+const PULL_TIMEOUT_SECS: u64 = 30;
 /// Header words that suggest per-person data. Refused on import (ArbVG / DSGVO).
 const PERSONAL_HEADERS: &[&str] = &[
     "user",
@@ -61,6 +69,13 @@ pub enum Command {
     },
     TelemetryImport {
         path: String,
+        dry_run: bool,
+    },
+    /// Read aggregate usage straight from a product database (read-only).
+    UsagePull {
+        source: String,
+        path: String,
+        query: String,
         dry_run: bool,
     },
     SignalAdd {
@@ -245,6 +260,12 @@ impl Command {
                 path: s(a, "path")?.into(),
                 dry_run: flag(a, "dry_run"),
             },
+            "gain_usage_pull" => Command::UsagePull {
+                source: opt_s(a, "source").unwrap_or_else(|| "sqlite".into()),
+                path: s(a, "path")?.into(),
+                query: s(a, "query")?.into(),
+                dry_run: flag(a, "dry_run"),
+            },
             "gain_signal_add" => Command::SignalAdd {
                 account: s(a, "account")?.into(),
                 polarity: opt_s(a, "polarity").unwrap_or_else(|| "negative".into()),
@@ -363,6 +384,12 @@ pub fn dispatch(ctx: &mut Ctx, cmd: Command) -> Result<Value, String> {
             account_json(&g.update_account(&account, &patch).map_err(e)?)
         }
         Command::TelemetryImport { path, dry_run } => telemetry_import(ctx, &path, dry_run),
+        Command::UsagePull {
+            source,
+            path,
+            query,
+            dry_run,
+        } => usage_pull(ctx, &source, &path, &query, dry_run),
         Command::SignalAdd {
             account,
             polarity,
@@ -966,7 +993,182 @@ fn telemetry_import(ctx: &mut Ctx, path: &str, dry_run: bool) -> Result<Value, S
     }
     let text = std::fs::read_to_string(&p).map_err(|x| format!("{}: {x}", p.display()))?;
     let rows = parse_telemetry(&text)?;
-    // Resolve every account before writing anything.
+    import_rows(
+        ctx,
+        rows,
+        dry_run,
+        json!({ "kind": "csv", "path": p.display().to_string() }),
+    )
+}
+
+/// Read aggregate usage straight from a SQLite product database.
+///
+/// The connection is opened read-only (`query_only`), the query must be one
+/// SELECT/WITH statement, its result columns must be exactly the aggregate
+/// schema (`account, date, active_users[, sessions, key_actions]`), and the
+/// rows then go through the same importer as a CSV, so the privacy guard,
+/// all-or-nothing resolution and per-day idempotency are identical.
+fn usage_pull(
+    ctx: &mut Ctx,
+    source: &str,
+    path: &str,
+    query: &str,
+    dry_run: bool,
+) -> Result<Value, String> {
+    let source = source.trim().to_ascii_lowercase();
+    if source != "sqlite" {
+        return Err(format!(
+            "source {source:?} is not supported. gaincraft reads SQLite product databases (source \"sqlite\") and nothing else: no PostgreSQL/MySQL driver is built in."
+        ));
+    }
+    let q = query.trim();
+    if q.is_empty() {
+        return Err("query is empty".into());
+    }
+    let head = q
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_ascii_uppercase();
+    if head != "SELECT" && head != "WITH" {
+        return Err(
+            "query must be one SELECT (or WITH ... SELECT). gaincraft opens the product database read-only and never writes to it."
+                .into(),
+        );
+    }
+    if q.contains(';') {
+        return Err("query must be a single statement; remove the ';'".into());
+    }
+    let p = ctx.confinement.check(path, false)?;
+    let conn = Connection::open_with_flags(
+        &p,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|x| format!("{}: {x}", p.display()))?;
+    conn.execute_batch("PRAGMA query_only = ON;")
+        .map_err(|x| format!("{}: {x}", p.display()))?;
+    // rusqlite 0.40 has no public progress handler; interrupt from a timer.
+    let done = Arc::new(AtomicBool::new(false));
+    let interrupt = conn.get_interrupt_handle();
+    let timer = {
+        let done = Arc::clone(&done);
+        std::thread::spawn(move || {
+            let deadline = Instant::now() + std::time::Duration::from_secs(PULL_TIMEOUT_SECS);
+            while Instant::now() < deadline {
+                if done.load(Ordering::Relaxed) {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            if !done.load(Ordering::Relaxed) {
+                interrupt.interrupt();
+            }
+        })
+    };
+
+    let result = (|| -> Result<(usize, String, Vec<String>), String> {
+        let mut stmt = conn.prepare(q).map_err(pull_error)?;
+        let cols: Vec<String> = stmt.column_names().iter().map(|c| c.to_string()).collect();
+        check_header(&cols)?;
+        let wanted = ["account", "date", "active_users", "sessions", "key_actions"];
+        let mut text = String::from("account;date;active_users;sessions;key_actions\n");
+        let mut read = 0usize;
+        {
+            let mut rows = stmt.query([]).map_err(pull_error)?;
+            while let Some(row) = rows.next().map_err(pull_error)? {
+                read += 1;
+                if read > MAX_PULL_ROWS {
+                    return Err(format!(
+                        "query returned more than {MAX_PULL_ROWS} rows; aggregate further or narrow it"
+                    ));
+                }
+                let mut vals: Vec<String> = Vec::with_capacity(wanted.len());
+                for name in wanted {
+                    let ix = cols
+                        .iter()
+                        .position(|c| c.trim().eq_ignore_ascii_case(name));
+                    let v = match ix {
+                        Some(i) => value_text(row.get_ref(i).map_err(pull_error)?, name)?,
+                        None => String::new(),
+                    };
+                    if (name == "account" || name == "date")
+                        && (v.contains(';') || v.contains('\n') || v.contains('\r'))
+                    {
+                        return Err(format!(
+                            "value {v:?} contains ';' or a newline; return one cleaned value per column"
+                        ));
+                    }
+                    vals.push(v);
+                }
+                let add: usize = vals.iter().map(|v| v.len() + 1).sum();
+                if text.len() + add > MAX_IMPORT_BYTES as usize {
+                    return Err("query result larger than 20 MB; aggregate further".into());
+                }
+                text.push_str(&vals.join(";"));
+                text.push('\n');
+            }
+        }
+        Ok((read, text, cols))
+    })();
+    done.store(true, Ordering::Relaxed);
+    let _ = timer.join();
+    drop(conn);
+    let (read, text, cols) = result?;
+    if read == 0 {
+        return Err("query returned no rows".into());
+    }
+    let parsed = parse_telemetry(&text)?;
+    import_rows(
+        ctx,
+        parsed,
+        dry_run,
+        json!({
+            "kind": "sqlite",
+            "path": p.display().to_string(),
+            "rows_read": read,
+            "columns": cols,
+        }),
+    )
+}
+
+fn pull_error(x: rusqlite::Error) -> String {
+    if let rusqlite::Error::SqliteFailure(e, _) = &x {
+        if e.code == rusqlite::ErrorCode::OperationInterrupted {
+            return format!(
+                "query exceeded {PULL_TIMEOUT_SECS} s and was interrupted; aggregate further or narrow it"
+            );
+        }
+    }
+    format!("query: {x} (read-only connection)")
+}
+
+/// One SQLite cell as CSV text; NULL stays empty so optional columns fall to 0.
+fn value_text(v: rusqlite::types::ValueRef<'_>, col: &str) -> Result<String, String> {
+    use rusqlite::types::ValueRef;
+    Ok(match v {
+        ValueRef::Null => String::new(),
+        ValueRef::Integer(i) => i.to_string(),
+        ValueRef::Real(f) => {
+            if f.fract() == 0.0 && f.is_finite() {
+                format!("{}", f as i64)
+            } else {
+                return Err(format!(
+                    "column {col} is fractional ({f}); counts must be whole numbers"
+                ));
+            }
+        }
+        ValueRef::Text(t) => String::from_utf8_lossy(t).into_owned(),
+        ValueRef::Blob(_) => return Err(format!("column {col} is a BLOB; return text or numbers")),
+    })
+}
+
+/// Resolve every account before writing anything, then upsert day by day.
+fn import_rows(
+    ctx: &mut Ctx,
+    rows: Vec<(String, Day)>,
+    dry_run: bool,
+    source: Value,
+) -> Result<Value, String> {
     let mut by_account: BTreeMap<i64, (String, Vec<Day>)> = BTreeMap::new();
     for (acc, day) in rows {
         let a = ctx
@@ -989,7 +1191,7 @@ fn telemetry_import(ctx: &mut Ctx, path: &str, dry_run: bool) -> Result<Value, S
         summary
             .push(json!({ "account": key, "days": days.len(), "inserted": ins, "replaced": rep }));
     }
-    Ok(json!({ "dry_run": dry_run, "accounts": summary.len(), "rows": summary }))
+    Ok(json!({ "dry_run": dry_run, "source": source, "accounts": summary.len(), "rows": summary }))
 }
 
 fn event_date(created: &str) -> NaiveDate {
@@ -1379,6 +1581,7 @@ pub fn tools() -> Vec<Value> {
         tool("gain_account_show", "One account with current health and components, score trend, signals, open CTAs and triage.", json!({ "account": acc, "as_of": date }), &["account"]),
         tool("gain_account_update", "Change account fields; null clears. active=false retires an account.", json!({ "account": acc, "name": {"type":"string"}, "domain": {"type":["string","null"]}, "owner": {"type":["string","null"]}, "arr": money, "seats": {"type":["integer","null"]}, "contract_id": {"type":["string","null"]}, "term_end": {"type":["string","null"]}, "last_notice": {"type":["string","null"]}, "renewal_months": {"type":["integer","null"]}, "active": {"type":"boolean"}, "retired_on": {"type":["string","null"], "description": "churn date (default: today when active turns false)"}, "notes": {"type":"string"} }), &["account"]),
         tool("gain_telemetry_import", "Import usage aggregates per account and day: account;date;active_users[;sessions;key_actions]. Per-person columns are refused (ArbVG / DSGVO). Re-importing a day replaces it.", json!({ "path": {"type":"string"}, "dry_run": {"type":"boolean"} }), &["path"]),
+        tool("gain_usage_pull", "Read aggregate usage straight from a SQLite product database (opened read-only, one SELECT/WITH). The result must return account, date, active_users[, sessions, key_actions]; per-person or extra columns are refused. Same validation, account resolution and per-day idempotency as gain_telemetry_import.", json!({ "source": {"type":"string","enum":["sqlite"],"description":"source (default sqlite)"}, "path": {"type":"string","description":"product SQLite file, opened read-only"}, "query": {"type":"string","description":"one SELECT/WITH returning account, date, active_users[, sessions, key_actions]"}, "dry_run": {"type":"boolean"} }), &["path", "query"]),
         tool("gain_signal_add", "Record a customer signal by hand (e.g. after a call): negative or positive, score 1-10, with a note.", json!({ "account": acc, "polarity": {"type":"string","enum":["negative","positive"]}, "score": {"type":"integer"}, "note": {"type":"string"}, "reference": {"type":"string"}, "date": date }), &["account", "score", "note"]),
         tool("gain_health", "Health score 0-100 of one account with components (adoption, recency, sentiment, modifier); stores a snapshot and raises CTAs.", json!({ "account": acc, "as_of": date }), &["account"]),
         tool("gain_health_all", "Health of all active accounts, worst first, ARR at risk (yellow + red); stores snapshots and raises CTAs.", json!({ "as_of": date }), &[]),

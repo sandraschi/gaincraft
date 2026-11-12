@@ -110,6 +110,160 @@ fn telemetry_header_refuses_personal_columns() {
     );
 }
 
+fn product_db(tag: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("gaincraft-pull-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let p = dir.join("product.db");
+    let c = rusqlite::Connection::open(&p).unwrap();
+    c.execute_batch(
+        "CREATE TABLE events (customer TEXT, day TEXT, user_id INTEGER);
+         INSERT INTO events VALUES
+           ('mockova.example','2026-11-02',1),
+           ('mockova.example','2026-11-02',2),
+           ('mockova.example','2026-11-03',1),
+           ('mockova.example','2026-11-03',2),
+           ('mockova.example','2026-11-03',3);",
+    )
+    .unwrap();
+    p
+}
+
+#[test]
+fn usage_pull_aggregates_a_product_database_read_only() {
+    let mut c = ctx("pull");
+    run(
+        &mut c,
+        "gain_account_add",
+        json!({ "name": "Anna Mockova KG", "domain": "mockova.example" }),
+    )
+    .unwrap();
+    let p = product_db("ok");
+    let q = "SELECT customer AS account, day AS date, COUNT(DISTINCT user_id) AS active_users \
+             FROM events GROUP BY customer, day ORDER BY day";
+    let dry = run(
+        &mut c,
+        "gain_usage_pull",
+        json!({ "path": p.to_string_lossy(), "query": q, "dry_run": true }),
+    )
+    .unwrap();
+    assert_eq!(dry["dry_run"], true);
+    assert_eq!(dry["source"]["rows_read"], 2);
+    assert_eq!(dry["source"]["kind"], "sqlite");
+    let a = c.gain.account("mockova.example").unwrap();
+    assert!(
+        c.gain
+            .days(a.id, d("2026-11-01"), d("2026-11-30"))
+            .unwrap()
+            .is_empty(),
+        "a dry run writes nothing"
+    );
+    let got = run(
+        &mut c,
+        "gain_usage_pull",
+        json!({ "path": p.to_string_lossy(), "query": q }),
+    )
+    .unwrap();
+    assert_eq!(got["rows"][0]["inserted"], 2);
+    let days = c.gain.days(a.id, d("2026-11-01"), d("2026-11-30")).unwrap();
+    assert_eq!(days.len(), 2);
+    assert_eq!(
+        days.iter()
+            .find(|x| x.date == d("2026-11-02"))
+            .unwrap()
+            .active_users,
+        2
+    );
+    assert_eq!(
+        days.iter()
+            .find(|x| x.date == d("2026-11-03"))
+            .unwrap()
+            .active_users,
+        3
+    );
+    let again = run(
+        &mut c,
+        "gain_usage_pull",
+        json!({ "path": p.to_string_lossy(), "query": q }),
+    )
+    .unwrap();
+    assert_eq!(
+        again["rows"][0]["replaced"], 2,
+        "re-running a day replaces it"
+    );
+    // The product database was opened read-only and is untouched.
+    let probe = rusqlite::Connection::open(&p).unwrap();
+    let n: i64 = probe
+        .query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(n, 5);
+}
+
+#[test]
+fn usage_pull_refuses_writes_personal_columns_and_other_sources() {
+    let mut c = ctx("pull-bad");
+    run(
+        &mut c,
+        "gain_account_add",
+        json!({ "name": "Anna Mockova KG", "domain": "mockova.example" }),
+    )
+    .unwrap();
+    let p = product_db("bad");
+    let path = p.to_string_lossy().to_string();
+    for q in [
+        "DELETE FROM events",
+        "PRAGMA writable_schema = ON",
+        "SELECT 1; DROP TABLE events",
+    ] {
+        let err = run(
+            &mut c,
+            "gain_usage_pull",
+            json!({ "path": path, "query": q }),
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("SELECT") || err.contains("single statement"),
+            "{q}: {err}"
+        );
+    }
+    let err = run(
+        &mut c,
+        "gain_usage_pull",
+        json!({
+            "path": path,
+            "query": "SELECT customer AS account, day AS date, user_id AS email FROM events"
+        }),
+    )
+    .unwrap_err();
+    assert!(err.contains("per-person"), "{err}");
+    let err = run(
+        &mut c,
+        "gain_usage_pull",
+        json!({
+            "path": path,
+            "query": "SELECT customer AS account, day AS date FROM events"
+        }),
+    )
+    .unwrap_err();
+    assert!(err.contains("missing column active_users"), "{err}");
+    let err = run(
+        &mut c,
+        "gain_usage_pull",
+        json!({
+            "source": "postgres",
+            "path": path,
+            "query": "SELECT 1 AS account, '2026-11-02' AS date, 1 AS active_users"
+        }),
+    )
+    .unwrap_err();
+    assert!(err.contains("not supported"), "{err}");
+    let probe = rusqlite::Connection::open(&p).unwrap();
+    let n: i64 = probe
+        .query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(n, 5, "nothing was written to the product database");
+}
+
 #[test]
 fn import_resolves_every_account_before_writing() {
     let mut c = ctx("import");

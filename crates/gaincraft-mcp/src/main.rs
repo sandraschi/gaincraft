@@ -17,6 +17,7 @@ use std::process::ExitCode;
 const AFTER_HELP: &str = "Typical week:
   gaincraft inbox-drain                         # contracts from contractcraft, unhappy mails from deskcraft
   gaincraft import D:\\Exports\\usage.csv         # account;date;active_users[;sessions;key_actions]
+  gaincraft usage-pull --from product.db --query \"SELECT customer AS account, day AS date, COUNT(DISTINCT user_id) AS active_users FROM events GROUP BY 1,2\" --dry-run
   gaincraft health-all                          # worst first, ARR at risk
   gaincraft show mockingbird.example            # why the score is what it is
   gaincraft cta                                 # what to do this week
@@ -108,6 +109,17 @@ enum Cmd {
     /// Import aggregate usage CSV.
     Import {
         path: String,
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Pull aggregate usage from a SQLite product database (read-only).
+    UsagePull {
+        /// Product SQLite database; opened read-only.
+        #[arg(long = "from")]
+        from: String,
+        /// One SELECT/WITH returning account, date, active_users[, sessions, key_actions].
+        #[arg(long)]
+        query: String,
         #[arg(long)]
         dry_run: bool,
     },
@@ -324,6 +336,14 @@ fn to_tool(cmd: Cmd) -> Result<(&'static str, Value), String> {
         Cmd::Import { path, dry_run } => (
             "gain_telemetry_import",
             json!({ "path": path, "dry_run": dry_run }),
+        ),
+        Cmd::UsagePull {
+            from,
+            query,
+            dry_run,
+        } => (
+            "gain_usage_pull",
+            json!({ "source": "sqlite", "path": from, "query": query, "dry_run": dry_run }),
         ),
         Cmd::Signal {
             account,
@@ -792,7 +812,7 @@ mod tests {
         assert_eq!(init["result"]["serverInfo"]["name"], "gaincraft");
         let list =
             handle_line(&mut h, r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#).unwrap();
-        assert_eq!(list["result"]["tools"].as_array().map(Vec::len), Some(20));
+        assert_eq!(list["result"]["tools"].as_array().map(Vec::len), Some(21));
         let seed = handle_line(&mut h, r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"gain_demo_seed","arguments":{}}}"#).unwrap();
         assert_eq!(seed["result"]["isError"], false, "{seed}");
         let show = handle_line(&mut h, r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"gain.account_show","arguments":{"account":"mockinger.example","as_of":"09.11.2026"}}}"#).unwrap();
@@ -818,6 +838,11 @@ mod tests {
             Cmd::List { all: false },
             Cmd::Import {
                 path: "x.csv".into(),
+                dry_run: true,
+            },
+            Cmd::UsagePull {
+                from: "product.db".into(),
+                query: "SELECT 1 AS account, '2026-11-02' AS date, 1 AS active_users".into(),
                 dry_run: true,
             },
             Cmd::Signal {

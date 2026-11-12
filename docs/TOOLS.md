@@ -11,6 +11,7 @@ is out of date. Every tool is also a CLI verb (`gaincraft --help`). Dotted names
 | `gain_account_show` | One account with current health and components, score trend, signals, open CTAs and triage. | `account` | `as_of` |
 | `gain_account_update` | Change account fields; null clears. active=false retires an account. | `account` | `active`, `arr`, `contract_id`, `domain`, `last_notice`, `name`, `notes`, `owner`, `renewal_months`, `retired_on`, `seats`, `term_end` |
 | `gain_telemetry_import` | Import usage aggregates per account and day: account;date;active_users[;sessions;key_actions]. Per-person columns are refused (ArbVG / DSGVO). Re-importing a day replaces it. | `path` | `dry_run` |
+| `gain_usage_pull` | Read aggregate usage straight from a SQLite product database (opened read-only, one SELECT/WITH). The result must return account, date, active_users[, sessions, key_actions]; per-person or extra columns are refused. Same validation, account resolution and per-day idempotency as gain_telemetry_import. | `path`, `query` | `dry_run`, `source` |
 | `gain_signal_add` | Record a customer signal by hand (e.g. after a call): negative or positive, score 1-10, with a note. | `account`, `score`, `note` | `date`, `polarity`, `reference` |
 | `gain_health` | Health score 0-100 of one account with components (adoption, recency, sentiment, modifier); stores a snapshot and raises CTAs. | `account` | `as_of` |
 | `gain_health_all` | Health of all active accounts, worst first, ARR at risk (yellow + red); stores snapshots and raises CTAs. | - | `as_of` |

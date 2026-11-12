@@ -46,6 +46,10 @@ pub const COVERAGE: &[(&str, &str)] = &[
     ("gain_account_update", "Customer 360 > Edit, Retire"),
     ("gain_telemetry_import", "Import usage > Dry run, Import"),
     (
+        "gain_usage_pull",
+        "Import usage > Pull from SQLite; File > Pull Usage from SQLite",
+    ),
+    (
         "gain_signal_add",
         "Customer 360 > Add signal; Signals > Record signal",
     ),
@@ -1227,6 +1231,41 @@ impl GainApp {
                         self.import.preview = Some(self.preview(&p));
                     }
                 }
+            });
+        });
+        ui.add_space(10.0);
+        widgets::card(ui, |ui| {
+            ui.set_width(ui.available_width());
+            widgets::section(
+                ui,
+                f.t(
+                    "Direkt aus der Produktdatenbank",
+                    "Straight from the product database",
+                ),
+                None,
+            );
+            ui.label(f.t(
+                "Ein SELECT gegen die SQLite-Datenbank des Produkts, schreibgeschuetzt und mit Zeitlimit. Er muss account, date, active_users und optional sessions, key_actions liefern; alles andere wird abgelehnt.",
+                "One SELECT against the product's SQLite database, opened read-only with a time limit. It must return account, date, active_users and optionally sessions, key_actions; anything else is refused.",
+            ));
+            ui.label(
+                RichText::new(
+                    "SELECT customer AS account, day AS date, COUNT(DISTINCT user_id) AS active_users\nFROM events GROUP BY 1, 2",
+                )
+                .family(egui::FontFamily::Monospace)
+                .size(12.0),
+            );
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                if widgets::primary(ui, f.t("Aus SQLite ziehen...", "Pull from SQLite..."))
+                    .clicked()
+                {
+                    f.form("gain_usage_pull", &[("source", "sqlite")]);
+                }
+                ui.label(f.t(
+                    "Probelauf zuerst: dry_run ankreuzen, dann ohne schreiben.",
+                    "Dry run first: tick dry_run, then run it again to write.",
+                ));
             });
         });
         ui.add_space(10.0);
@@ -2421,6 +2460,18 @@ impl SuiteApp for GainApp {
                     V_IMPORT,
                 )
                 .key(cmd, Key::O),
+                Item::form(
+                    f.t(
+                        "Nutzung aus SQLite ziehen...",
+                        "Pull Usage from SQLite...",
+                    ),
+                    "gain_usage_pull",
+                    &[("source", "sqlite")],
+                )
+                .hint(f.t(
+                    "Liest Summen direkt aus der Produktdatenbank (nur SELECT, schreibgeschuetzt)",
+                    "Reads totals straight from the product database (SELECT only, read-only)",
+                )),
             ],
             save_as: Some(
                 Item::form(
