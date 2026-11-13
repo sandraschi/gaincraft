@@ -1189,7 +1189,7 @@ dependencies = [
 
 [[package]]
 name = "gaincraft-app"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "chrono",
  "craft-biz",
@@ -1204,7 +1204,7 @@ dependencies = [
 
 [[package]]
 name = "gaincraft-core"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "chrono",
  "craft-biz",
@@ -1216,7 +1216,7 @@ dependencies = [
 
 [[package]]
 name = "gaincraft-mcp"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "clap",
  "craft-biz",
@@ -1227,7 +1227,7 @@ dependencies = [
 
 [[package]]
 name = "gaincraft-store"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "chrono",
  "rusqlite",
