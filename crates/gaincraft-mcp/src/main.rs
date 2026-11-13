@@ -865,7 +865,7 @@ mod tests {
         assert_eq!(init["result"]["serverInfo"]["name"], "gaincraft");
         let list =
             handle_line(&mut h, r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#).unwrap();
-        assert_eq!(list["result"]["tools"].as_array().map(Vec::len), Some(21));
+        assert_eq!(list["result"]["tools"].as_array().map(Vec::len), Some(23));
         let seed = handle_line(&mut h, r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"gain_demo_seed","arguments":{}}}"#).unwrap();
         assert_eq!(seed["result"]["isError"], false, "{seed}");
         let show = handle_line(&mut h, r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"gain.account_show","arguments":{"account":"mockinger.example","as_of":"09.11.2026"}}}"#).unwrap();

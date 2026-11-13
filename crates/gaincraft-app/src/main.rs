@@ -49,6 +49,8 @@ pub const COVERAGE: &[(&str, &str)] = &[
         "gain_usage_pull",
         "Import usage > Pull from SQLite; File > Pull Usage from SQLite",
     ),
+    ("gain_tick", "Commands > Run Scheduled Pass"),
+    ("gain_alerts", "Commands > Show Alerts"),
     (
         "gain_signal_add",
         "Customer 360 > Add signal; Signals > Record signal",
@@ -2575,6 +2577,16 @@ impl SuiteApp for GainApp {
                             json!({}),
                         )
                         .key(cmd, Key::R),
+                        Item::run(
+                            f.t("Lauf ausführen", "Run Scheduled Pass"),
+                            "gain_tick",
+                            json!({}),
+                        ),
+                        Item::run(
+                            f.t("Hinweise anzeigen", "Show Alerts"),
+                            "gain_alerts",
+                            json!({}),
+                        ),
                         Item::run(
                             f.t("Aufgaben-Regeln ausführen", "Run CTA Trigger Engine"),
                             "gain_health_all",
