@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.1 - 2026-11-13
 
 - `gain_usage_pull` (CLI `usage-pull`, `--from` + `--query`): read aggregate usage straight from a SQLite product database. Read-only connection, `query_only`, 30 s interrupt, 1,000,000-row and 20 MB caps, one SELECT/WITH enforced. The result must return `account, date, active_users[, sessions, key_actions]`; extra or per-person columns are refused, unknown accounts stop the pull before writing, and re-running a day replaces it. Rows go through the same importer as a CSV.
 - `source` must be `sqlite`; PostgreSQL/MySQL are not built in and say so.

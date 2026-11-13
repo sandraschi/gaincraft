@@ -3,13 +3,15 @@
 
 pub mod health;
 
-use chrono::{Datelike, Duration, Local, NaiveDate, Weekday};
+use chrono::{Datelike, Duration, Local, NaiveDate, SecondsFormat, Utc, Weekday};
 use craft_biz::at::parse_date;
 use craft_biz::bus::Bus;
 pub use craft_biz::confine::Confinement;
 use craft_biz::mcp::tool;
 use craft_biz::Money;
-use gaincraft_store::{Account, AccountPatch, Day, Gain, GainError, NewAccount, NewSignal};
+use gaincraft_store::{
+    Account, AccountPatch, Day, Gain, GainError, NewAccount, NewSignal, NewSyncRun,
+};
 use health::{Health, Weights};
 use rusqlite::{Connection, OpenFlags};
 use serde_json::{json, Value};
@@ -77,6 +79,21 @@ pub enum Command {
         path: String,
         query: String,
         dry_run: bool,
+    },
+    /// Scheduled pass: optional usage pull, health for all, alerts, run history.
+    Tick {
+        source: Option<String>,
+        path: Option<String>,
+        query: Option<String>,
+        dry_run: bool,
+        report: Option<String>,
+        as_of: Option<NaiveDate>,
+    },
+    /// What needs attention now (band changes, new CTAs, renewals, silence).
+    Alerts {
+        as_of: Option<NaiveDate>,
+        since: Option<NaiveDate>,
+        within_days: i64,
     },
     SignalAdd {
         account: String,
@@ -266,6 +283,28 @@ impl Command {
                 query: s(a, "query")?.into(),
                 dry_run: flag(a, "dry_run"),
             },
+            "gain_tick" => {
+                let path = opt_s(a, "path");
+                let query = opt_s(a, "query");
+                if path.is_some() != query.is_some() {
+                    return Err(
+                        "path and query go together; omit both for a health-only tick".into(),
+                    );
+                }
+                Command::Tick {
+                    source: opt_s(a, "source"),
+                    path,
+                    query,
+                    dry_run: flag(a, "dry_run"),
+                    report: opt_s(a, "report"),
+                    as_of: opt_date(a, "as_of")?,
+                }
+            }
+            "gain_alerts" => Command::Alerts {
+                as_of: opt_date(a, "as_of")?,
+                since: opt_date(a, "since")?,
+                within_days: int(a, "within_days")?.unwrap_or(60).clamp(0, 3650),
+            },
             "gain_signal_add" => Command::SignalAdd {
                 account: s(a, "account")?.into(),
                 polarity: opt_s(a, "polarity").unwrap_or_else(|| "negative".into()),
@@ -390,6 +429,27 @@ pub fn dispatch(ctx: &mut Ctx, cmd: Command) -> Result<Value, String> {
             query,
             dry_run,
         } => usage_pull(ctx, &source, &path, &query, dry_run),
+        Command::Tick {
+            source,
+            path,
+            query,
+            dry_run,
+            report,
+            as_of,
+        } => tick(
+            ctx,
+            source.as_deref(),
+            path.as_deref(),
+            query.as_deref(),
+            dry_run,
+            report.as_deref(),
+            as_of,
+        ),
+        Command::Alerts {
+            as_of,
+            since,
+            within_days,
+        } => alerts(g, as_of.unwrap_or_else(today), since, within_days),
         Command::SignalAdd {
             account,
             polarity,
@@ -1194,6 +1254,273 @@ fn import_rows(
     Ok(json!({ "dry_run": dry_run, "source": source, "accounts": summary.len(), "rows": summary }))
 }
 
+fn now_utc() -> String {
+    Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true)
+}
+
+fn date_of_ts(s: &str) -> Option<NaiveDate> {
+    s.get(..10)
+        .and_then(|d| NaiveDate::parse_from_str(d, "%Y-%m-%d").ok())
+}
+
+/// Band changes, CTAs created since `since`, renewals inside `within` days,
+/// and at-risk accounts with no activity for 14+ days.
+fn alerts(
+    g: &Gain,
+    as_of: NaiveDate,
+    since: Option<NaiveDate>,
+    within: i64,
+) -> Result<Value, String> {
+    let since = since.unwrap_or(as_of);
+    let (mut changed, mut new_ctas, mut renewals, mut silent) =
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    for a in g.accounts(false).map_err(e)? {
+        let h = health_of(g, &a, as_of)?;
+        let snaps = g.snapshots(a.id, 2).map_err(e)?;
+        if let Some(prev) = snaps.iter().find(|s| s.date < as_of) {
+            if prev.band != h.band {
+                changed.push(json!({
+                    "account": a.key, "name": a.name,
+                    "from": prev.band, "to": h.band,
+                    "score_from": prev.score, "score_to": h.score,
+                    "arr": a.arr_cents.map(eur),
+                }));
+            }
+        }
+        for c in g.ctas(Some(a.id), true).map_err(e)? {
+            if c.created_on >= since {
+                new_ctas.push(json!({
+                    "id": c.id, "account": a.key, "name": a.name,
+                    "kind": c.kind, "title": c.title, "due": c.due,
+                    "created_on": c.created_on, "status": c.status,
+                    "arr": a.arr_cents.map(eur),
+                }));
+            }
+        }
+        for (kind, d) in [("notice", a.last_notice), ("term_end", a.term_end)] {
+            if let Some(d) = d.filter(|d| *d >= as_of && (*d - as_of).num_days() <= within) {
+                renewals.push(json!({
+                    "account": a.key, "name": a.name, "kind": kind, "date": d,
+                    "days_left": (d - as_of).num_days(), "arr": a.arr_cents.map(eur),
+                }));
+            }
+        }
+        if h.days_since_active.is_some_and(|n| n >= 14) && h.band != "green" {
+            silent.push(json!({
+                "account": a.key, "name": a.name,
+                "days_since_active": h.days_since_active,
+                "score": h.score, "band": h.band, "arr": a.arr_cents.map(eur),
+            }));
+        }
+    }
+    changed.sort_by_key(|v| v["score_to"].as_i64().unwrap_or(0));
+    new_ctas.sort_by(|x, y| y["created_on"].as_str().cmp(&x["created_on"].as_str()));
+    renewals.sort_by(|x, y| x["date"].as_str().cmp(&y["date"].as_str()));
+    silent.sort_by_key(|v| -v["days_since_active"].as_i64().unwrap_or(0));
+    let count = changed.len() + new_ctas.len() + renewals.len() + silent.len();
+    Ok(json!({
+        "as_of": as_of, "since": since, "within_days": within,
+        "count": count,
+        "changed": changed, "new_ctas": new_ctas,
+        "renewals": renewals, "silent": silent,
+    }))
+}
+
+/// One scheduled pass: optional pull, health for all, alerts, and a run record.
+fn tick(
+    ctx: &mut Ctx,
+    source: Option<&str>,
+    path: Option<&str>,
+    query: Option<&str>,
+    dry_run: bool,
+    report: Option<&str>,
+    as_of: Option<NaiveDate>,
+) -> Result<Value, String> {
+    let started = now_utc();
+    let as_of = as_of.unwrap_or_else(today);
+    let prev = ctx.gain.last_sync_run().map_err(e)?;
+    let since = Some(
+        prev.as_ref()
+            .and_then(|r| date_of_ts(&r.finished))
+            .filter(|d| *d <= as_of)
+            .unwrap_or(as_of),
+    );
+    let source_label = path
+        .map(|p| format!("sqlite:{p}"))
+        .unwrap_or_else(|| "none".into());
+    let mark_error = |ctx: &mut Ctx, err: &str| {
+        let _ = ctx.gain.record_sync_run(&NewSyncRun {
+            started: started.clone(),
+            finished: now_utc(),
+            source: source_label.clone(),
+            accounts: 0,
+            rows_read: 0,
+            wrote: false,
+            alerts: 0,
+            status: "error".into(),
+            error: Some(err.to_string()),
+        });
+    };
+
+    let pull = match (path, query) {
+        (Some(p), Some(q)) => match usage_pull(ctx, source.unwrap_or("sqlite"), p, q, dry_run) {
+            Ok(v) => Some(v),
+            Err(err) => {
+                mark_error(ctx, &err);
+                return Err(err);
+            }
+        },
+        _ => None,
+    };
+    let health = match health_all(&ctx.gain, as_of) {
+        Ok(v) => v,
+        Err(err) => {
+            mark_error(ctx, &err);
+            return Err(err);
+        }
+    };
+    let al = match alerts(&ctx.gain, as_of, since, 60) {
+        Ok(v) => v,
+        Err(err) => {
+            mark_error(ctx, &err);
+            return Err(err);
+        }
+    };
+    let rows_read = pull
+        .as_ref()
+        .and_then(|p| p["source"]["rows_read"].as_i64())
+        .unwrap_or(0);
+    let accounts = health["accounts"].as_i64().unwrap_or(0);
+    let alert_count = al["count"].as_i64().unwrap_or(0);
+    let run = ctx
+        .gain
+        .record_sync_run(&NewSyncRun {
+            started,
+            finished: now_utc(),
+            source: source_label,
+            accounts,
+            rows_read,
+            wrote: pull.is_some() && !dry_run,
+            alerts: alert_count,
+            status: "ok".into(),
+            error: None,
+        })
+        .map_err(e)?;
+    let mut out = json!({
+        "as_of": as_of,
+        "run": to_json(&run)?,
+        "pull": pull,
+        "health": {
+            "accounts": accounts,
+            "arr_at_risk": health["arr_at_risk"],
+            "new_ctas": health["new_ctas"],
+        },
+        "alerts": al,
+    });
+    if let Some(path) = report {
+        let p = ctx.confinement.check(path, true)?;
+        std::fs::write(&p, digest(as_of, &out).as_bytes())
+            .map_err(|x| format!("{}: {x}", p.display()))?;
+        out["report"] = json!(p.display().to_string());
+    }
+    Ok(out)
+}
+
+fn digest(as_of: NaiveDate, out: &Value) -> String {
+    let run = &out["run"];
+    let al = &out["alerts"];
+    let mut s = String::new();
+    s.push_str(&format!("# GainCraft daily digest - {as_of}\n\n"));
+    s.push_str(&format!(
+        "Run: {} | source: {} | {} accounts | {} rows read | {} new CTAs | {} alerts\n\n",
+        run["status"].as_str().unwrap_or("?"),
+        run["source"].as_str().unwrap_or("?"),
+        run["accounts"].as_i64().unwrap_or(0),
+        run["rows_read"].as_i64().unwrap_or(0),
+        out["health"]["new_ctas"].as_i64().unwrap_or(0),
+        al["count"].as_i64().unwrap_or(0),
+    ));
+    let section = |s: &mut String, title: &str, rows: &[Value], line: &dyn Fn(&Value) -> String| {
+        s.push_str(&format!("## {title} ({})\n\n", rows.len()));
+        if rows.is_empty() {
+            s.push_str("- none\n\n");
+            return;
+        }
+        for r in rows {
+            s.push_str("- ");
+            s.push_str(&line(r));
+            s.push('\n');
+        }
+        s.push('\n');
+    };
+    fn arr(v: &Value) -> &str {
+        v.as_str().unwrap_or("-")
+    }
+    section(
+        &mut s,
+        "Health changes",
+        al["changed"].as_array().map(Vec::as_slice).unwrap_or(&[]),
+        &|r| {
+            format!(
+                "{} ({}): {} -> {} ({} -> {}), ARR {}",
+                r["name"].as_str().unwrap_or("?"),
+                r["account"].as_str().unwrap_or("?"),
+                arr(&r["from"]),
+                arr(&r["to"]),
+                r["score_from"].as_i64().unwrap_or(0),
+                r["score_to"].as_i64().unwrap_or(0),
+                arr(&r["arr"]),
+            )
+        },
+    );
+    section(
+        &mut s,
+        "New calls to action",
+        al["new_ctas"].as_array().map(Vec::as_slice).unwrap_or(&[]),
+        &|r| {
+            format!(
+                "{} ({}): {} [{}]",
+                r["name"].as_str().unwrap_or("?"),
+                r["account"].as_str().unwrap_or("?"),
+                r["title"].as_str().unwrap_or("?"),
+                arr(&r["arr"]),
+            )
+        },
+    );
+    section(
+        &mut s,
+        "Renewals in 60 days",
+        al["renewals"].as_array().map(Vec::as_slice).unwrap_or(&[]),
+        &|r| {
+            format!(
+                "{} ({}): {} {} ({} days), ARR {}",
+                r["name"].as_str().unwrap_or("?"),
+                r["account"].as_str().unwrap_or("?"),
+                arr(&r["kind"]),
+                arr(&r["date"]),
+                r["days_left"].as_i64().unwrap_or(0),
+                arr(&r["arr"]),
+            )
+        },
+    );
+    section(
+        &mut s,
+        "At risk and silent",
+        al["silent"].as_array().map(Vec::as_slice).unwrap_or(&[]),
+        &|r| {
+            format!(
+                "{} ({}): score {}, {} days without activity, ARR {}",
+                r["name"].as_str().unwrap_or("?"),
+                r["account"].as_str().unwrap_or("?"),
+                r["score"].as_i64().unwrap_or(0),
+                r["days_since_active"].as_i64().unwrap_or(0),
+                arr(&r["arr"]),
+            )
+        },
+    );
+    s
+}
+
 fn event_date(created: &str) -> NaiveDate {
     created
         .get(..10)
@@ -1582,6 +1909,8 @@ pub fn tools() -> Vec<Value> {
         tool("gain_account_update", "Change account fields; null clears. active=false retires an account.", json!({ "account": acc, "name": {"type":"string"}, "domain": {"type":["string","null"]}, "owner": {"type":["string","null"]}, "arr": money, "seats": {"type":["integer","null"]}, "contract_id": {"type":["string","null"]}, "term_end": {"type":["string","null"]}, "last_notice": {"type":["string","null"]}, "renewal_months": {"type":["integer","null"]}, "active": {"type":"boolean"}, "retired_on": {"type":["string","null"], "description": "churn date (default: today when active turns false)"}, "notes": {"type":"string"} }), &["account"]),
         tool("gain_telemetry_import", "Import usage aggregates per account and day: account;date;active_users[;sessions;key_actions]. Per-person columns are refused (ArbVG / DSGVO). Re-importing a day replaces it.", json!({ "path": {"type":"string"}, "dry_run": {"type":"boolean"} }), &["path"]),
         tool("gain_usage_pull", "Read aggregate usage straight from a SQLite product database (opened read-only, one SELECT/WITH). The result must return account, date, active_users[, sessions, key_actions]; per-person or extra columns are refused. Same validation, account resolution and per-day idempotency as gain_telemetry_import.", json!({ "source": {"type":"string","enum":["sqlite"],"description":"source (default sqlite)"}, "path": {"type":"string","description":"product SQLite file, opened read-only"}, "query": {"type":"string","description":"one SELECT/WITH returning account, date, active_users[, sessions, key_actions]"}, "dry_run": {"type":"boolean"} }), &["path", "query"]),
+        tool("gain_tick", "One scheduled pass: optionally pull usage (path+query, SQLite read-only), recompute health for every account, collect alerts (band changes, new CTAs, renewals, silence), record the run and optionally write a Markdown digest. Omit path and query for a health-only tick.", json!({ "source": {"type":"string","enum":["sqlite"]}, "path": {"type":"string","description":"product SQLite file (with query)"}, "query": {"type":"string","description":"one SELECT/WITH returning the aggregate schema"}, "dry_run": {"type":"boolean"}, "report": {"type":"string","description":"write the Markdown digest here"}, "as_of": date }), &[]),
+        tool("gain_alerts", "What needs attention now: band changes since the previous snapshot, CTAs created on or after `since`, renewals inside `within_days`, and at-risk accounts silent for 14+ days.", json!({ "as_of": date, "since": date, "within_days": {"type":"integer","description":"7-3650, default 60"} }), &[]),
         tool("gain_signal_add", "Record a customer signal by hand (e.g. after a call): negative or positive, score 1-10, with a note.", json!({ "account": acc, "polarity": {"type":"string","enum":["negative","positive"]}, "score": {"type":"integer"}, "note": {"type":"string"}, "reference": {"type":"string"}, "date": date }), &["account", "score", "note"]),
         tool("gain_health", "Health score 0-100 of one account with components (adoption, recency, sentiment, modifier); stores a snapshot and raises CTAs.", json!({ "account": acc, "as_of": date }), &["account"]),
         tool("gain_health_all", "Health of all active accounts, worst first, ARR at risk (yellow + red); stores snapshots and raises CTAs.", json!({ "as_of": date }), &[]),

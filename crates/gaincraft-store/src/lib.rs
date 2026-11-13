@@ -18,7 +18,8 @@ use std::path::Path;
 
 /// 2: `accounts.retired_on` (churn date for the backtest), `ctas.params`
 /// (structured values so the window can word CTA titles in any language).
-pub const SCHEMA_VERSION: i64 = 2;
+/// 3: `sync_runs` (history of scheduled usage pulls and health passes).
+pub const SCHEMA_VERSION: i64 = 3;
 
 #[derive(Debug, thiserror::Error)]
 pub enum GainError {
@@ -161,6 +162,53 @@ pub struct Snapshot {
     pub band: String,
 }
 
+/// One scheduled tick: what was pulled, what was computed, what was raised.
+#[derive(Debug, Clone, Serialize)]
+pub struct SyncRun {
+    pub id: i64,
+    pub started: String,
+    pub finished: String,
+    pub source: String,
+    pub accounts: i64,
+    pub rows_read: i64,
+    pub wrote: bool,
+    pub alerts: i64,
+    pub status: String,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewSyncRun {
+    pub started: String,
+    pub finished: String,
+    pub source: String,
+    pub accounts: i64,
+    pub rows_read: i64,
+    pub wrote: bool,
+    pub alerts: i64,
+    /// `ok` or `error`.
+    pub status: String,
+    pub error: Option<String>,
+}
+
+const SYNC_COLS: &str =
+    "id, started, finished, source, accounts, rows_read, wrote, alerts, status, error";
+
+fn sync_row(r: &Row) -> rusqlite::Result<SyncRun> {
+    Ok(SyncRun {
+        id: r.get(0)?,
+        started: r.get(1)?,
+        finished: r.get(2)?,
+        source: r.get(3)?,
+        accounts: r.get(4)?,
+        rows_read: r.get(5)?,
+        wrote: r.get::<_, i64>(6)? != 0,
+        alerts: r.get(7)?,
+        status: r.get(8)?,
+        error: r.get(9)?,
+    })
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct Stats {
     pub accounts_active: i64,
@@ -239,16 +287,45 @@ CREATE TABLE IF NOT EXISTS snapshots (
     components TEXT NOT NULL,
     PRIMARY KEY (account_id, date)
 );
+CREATE TABLE IF NOT EXISTS sync_runs (
+    id INTEGER PRIMARY KEY,
+    started TEXT NOT NULL,
+    finished TEXT NOT NULL,
+    source TEXT NOT NULL,
+    accounts INTEGER NOT NULL DEFAULT 0,
+    rows_read INTEGER NOT NULL DEFAULT 0,
+    wrote INTEGER NOT NULL DEFAULT 0,
+    alerts INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL CHECK (status IN ('ok', 'error')),
+    error TEXT
+);
 ";
 
 const ACC_COLS: &str = "id, key, name, domain, owner, arr_cents, seats, contract_id, term_end, last_notice, renewal_months, auto_created, active, notes, retired_on";
 
 /// Schema steps after version 1. Each runs once, in order, in one transaction.
-const MIGRATIONS: &[(i64, &str)] = &[(
-    2,
-    "ALTER TABLE accounts ADD COLUMN retired_on TEXT;
-     ALTER TABLE ctas ADD COLUMN params TEXT NOT NULL DEFAULT '{}';",
-)];
+const MIGRATIONS: &[(i64, &str)] = &[
+    (
+        2,
+        "ALTER TABLE accounts ADD COLUMN retired_on TEXT;
+         ALTER TABLE ctas ADD COLUMN params TEXT NOT NULL DEFAULT '{}';",
+    ),
+    (
+        3,
+        "CREATE TABLE IF NOT EXISTS sync_runs (
+             id INTEGER PRIMARY KEY,
+             started TEXT NOT NULL,
+             finished TEXT NOT NULL,
+             source TEXT NOT NULL,
+             accounts INTEGER NOT NULL DEFAULT 0,
+             rows_read INTEGER NOT NULL DEFAULT 0,
+             wrote INTEGER NOT NULL DEFAULT 0,
+             alerts INTEGER NOT NULL DEFAULT 0,
+             status TEXT NOT NULL CHECK (status IN ('ok', 'error')),
+             error TEXT
+         );",
+    ),
+];
 
 fn acc_row(r: &Row) -> rusqlite::Result<Account> {
     Ok(Account {
@@ -878,6 +955,66 @@ impl Gain {
                     band: r.get(2)?,
                 })
             })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    // ---------- scheduled runs ----------
+
+    pub fn record_sync_run(&self, n: &NewSyncRun) -> Result<SyncRun> {
+        if n.status != "ok" && n.status != "error" {
+            return Err(GainError::Invalid(format!(
+                "sync status {:?} (ok or error)",
+                n.status
+            )));
+        }
+        self.conn.execute(
+            "INSERT INTO sync_runs (started, finished, source, accounts, rows_read, wrote, alerts, status, error)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                n.started,
+                n.finished,
+                n.source,
+                n.accounts,
+                n.rows_read,
+                n.wrote as i64,
+                n.alerts,
+                n.status,
+                n.error
+            ],
+        )?;
+        self.sync_run(self.conn.last_insert_rowid())?
+            .ok_or_else(|| GainError::Db("sync run vanished after insert".into()))
+    }
+
+    pub fn sync_run(&self, id: i64) -> Result<Option<SyncRun>> {
+        Ok(self
+            .conn
+            .query_row(
+                &format!("SELECT {SYNC_COLS} FROM sync_runs WHERE id = ?1"),
+                params![id],
+                sync_row,
+            )
+            .optional()?)
+    }
+
+    pub fn last_sync_run(&self) -> Result<Option<SyncRun>> {
+        Ok(self
+            .conn
+            .query_row(
+                &format!("SELECT {SYNC_COLS} FROM sync_runs ORDER BY id DESC LIMIT 1"),
+                [],
+                sync_row,
+            )
+            .optional()?)
+    }
+
+    pub fn sync_runs(&self, limit: usize) -> Result<Vec<SyncRun>> {
+        let mut st = self.conn.prepare(&format!(
+            "SELECT {SYNC_COLS} FROM sync_runs ORDER BY id DESC LIMIT ?1"
+        ))?;
+        let rows = st
+            .query_map(params![limit as i64], sync_row)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
     }

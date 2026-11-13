@@ -123,6 +123,30 @@ enum Cmd {
         #[arg(long)]
         dry_run: bool,
     },
+    /// One scheduled pass: optional pull, health for all, alerts, run record.
+    Tick {
+        /// Product SQLite database (with --query); omit both for a health-only tick.
+        #[arg(long = "from")]
+        from: Option<String>,
+        #[arg(long)]
+        query: Option<String>,
+        #[arg(long)]
+        dry_run: bool,
+        /// Write the Markdown digest here.
+        #[arg(long)]
+        report: Option<String>,
+        #[arg(long)]
+        as_of: Option<String>,
+    },
+    /// What needs attention now (band changes, new CTAs, renewals, silence).
+    Alerts {
+        #[arg(long)]
+        as_of: Option<String>,
+        #[arg(long)]
+        since: Option<String>,
+        #[arg(long = "within-days")]
+        within_days: Option<i64>,
+    },
     /// Record a customer signal by hand.
     Signal {
         account: String,
@@ -344,6 +368,35 @@ fn to_tool(cmd: Cmd) -> Result<(&'static str, Value), String> {
         } => (
             "gain_usage_pull",
             json!({ "source": "sqlite", "path": from, "query": query, "dry_run": dry_run }),
+        ),
+        Cmd::Tick {
+            from,
+            query,
+            dry_run,
+            report,
+            as_of,
+        } => (
+            "gain_tick",
+            obj(vec![
+                ("source", from.as_ref().map(|_| serde_json::json!("sqlite"))),
+                ("path", os(from)),
+                ("query", os(query)),
+                ("dry_run", Some(json!(dry_run))),
+                ("report", os(report)),
+                ("as_of", os(as_of)),
+            ]),
+        ),
+        Cmd::Alerts {
+            as_of,
+            since,
+            within_days,
+        } => (
+            "gain_alerts",
+            obj(vec![
+                ("as_of", os(as_of)),
+                ("since", os(since)),
+                ("within_days", within_days.map(|n| json!(n))),
+            ]),
         ),
         Cmd::Signal {
             account,

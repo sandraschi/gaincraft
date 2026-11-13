@@ -291,7 +291,8 @@ fn v1_database_migrates_in_place_and_keeps_its_rows() {
         .unwrap();
     }
     let g = Gain::open(&path).unwrap();
-    assert_eq!(g.meta("schema_version").unwrap().as_deref(), Some("2"));
+    assert_eq!(g.meta("schema_version").unwrap().as_deref(), Some("3"));
+    assert!(g.last_sync_run().unwrap().is_none(), "v3 table exists");
     let a = g.account("old").unwrap();
     assert_eq!(a.retired_on, None);
     let c = g.ctas(None, false).unwrap();
@@ -304,6 +305,62 @@ fn v1_database_migrates_in_place_and_keeps_its_rows() {
     drop(g);
     assert!(Gain::open(&path).is_err());
     let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn sync_runs_are_recorded_newest_first_with_their_outcome() {
+    let g = gain();
+    assert!(g.last_sync_run().unwrap().is_none());
+    let first = g
+        .record_sync_run(&NewSyncRun {
+            started: "2026-11-12T06:30:00Z".into(),
+            finished: "2026-11-12T06:30:02Z".into(),
+            source: "sqlite:product.db".into(),
+            accounts: 3,
+            rows_read: 90,
+            wrote: true,
+            alerts: 2,
+            status: "ok".into(),
+            error: None,
+        })
+        .unwrap();
+    assert_eq!((first.id, first.wrote, first.alerts), (1, true, 2));
+    let second = g
+        .record_sync_run(&NewSyncRun {
+            started: "2026-11-13T06:30:00Z".into(),
+            finished: "2026-11-13T06:30:01Z".into(),
+            source: "none".into(),
+            accounts: 3,
+            rows_read: 0,
+            wrote: false,
+            alerts: 0,
+            status: "error".into(),
+            error: Some("database is locked".into()),
+        })
+        .unwrap();
+    assert_eq!(second.id, 2);
+    assert_eq!(
+        g.last_sync_run().unwrap().map(|r| r.id),
+        Some(2),
+        "newest first"
+    );
+    let runs = g.sync_runs(10).unwrap();
+    assert_eq!(runs.iter().map(|r| r.id).collect::<Vec<_>>(), [2, 1]);
+    assert_eq!(runs[0].error.as_deref(), Some("database is locked"));
+    assert_eq!(runs[1].rows_read, 90);
+    assert!(g
+        .record_sync_run(&NewSyncRun {
+            started: "x".into(),
+            finished: "y".into(),
+            source: "none".into(),
+            accounts: 0,
+            rows_read: 0,
+            wrote: false,
+            alerts: 0,
+            status: "maybe".into(),
+            error: None,
+        })
+        .is_err());
 }
 
 #[test]

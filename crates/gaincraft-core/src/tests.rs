@@ -264,6 +264,193 @@ fn usage_pull_refuses_writes_personal_columns_and_other_sources() {
     assert_eq!(n, 5, "nothing was written to the product database");
 }
 
+fn product_db_days(tag: &str, days: i64) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("gaincraft-tick-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let p = dir.join("product.db");
+    let c = rusqlite::Connection::open(&p).unwrap();
+    c.execute_batch("CREATE TABLE events (customer TEXT, day TEXT, user_id INTEGER);")
+        .unwrap();
+    let today = Local::now().date_naive();
+    let mut ins = c.prepare("INSERT INTO events VALUES (?1, ?2, ?3)").unwrap();
+    for i in 0..days {
+        let day = (today - Duration::days(i)).to_string();
+        for user in 1..=6 {
+            ins.execute(rusqlite::params!["mockova.example", day, user])
+                .unwrap();
+        }
+    }
+    drop(ins);
+    p
+}
+
+#[test]
+fn tick_pulls_health_records_the_run_and_writes_a_digest() {
+    let mut c = ctx("tick");
+    run(
+        &mut c,
+        "gain_account_add",
+        json!({
+            "name": "Anna Mockova KG", "domain": "mockova.example",
+            "seats": 8, "arr": "9.600,00"
+        }),
+    )
+    .unwrap();
+    run(
+        &mut c,
+        "gain_account_update",
+        json!({
+            "account": "mockova.example",
+            "last_notice": (Local::now().date_naive() + Duration::days(30)).format("%d.%m.%Y").to_string()
+        }),
+    )
+    .unwrap();
+    let a = c.gain.account("mockova.example").unwrap();
+    // A previous reading that was red: today's green must raise a change alert.
+    c.gain
+        .snapshot(
+            a.id,
+            Local::now().date_naive() - Duration::days(1),
+            10,
+            "red",
+            "{}",
+        )
+        .unwrap();
+    let p = product_db_days("ok", 30);
+    let dir = std::env::temp_dir().join(format!("gaincraft-tick-rep-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let report = dir.join("digest.md");
+    let q = "SELECT customer AS account, day AS date, COUNT(DISTINCT user_id) AS active_users \
+             FROM events GROUP BY customer, day";
+    let out = run(
+        &mut c,
+        "gain_tick",
+        json!({
+            "path": p.to_string_lossy(),
+            "query": q,
+            "report": report.to_string_lossy(),
+        }),
+    )
+    .unwrap();
+    assert_eq!(out["run"]["status"], "ok");
+    assert_eq!(out["run"]["rows_read"], 30);
+    assert_eq!(out["run"]["accounts"], 1);
+    assert_eq!(out["health"]["accounts"], 1);
+    let changed = out["alerts"]["changed"].as_array().unwrap();
+    assert!(
+        changed
+            .iter()
+            .any(|v| v["to"] == "green" && v["from"] == "red"),
+        "{out}"
+    );
+    assert_eq!(out["alerts"]["renewals"].as_array().unwrap().len(), 1);
+    let text = std::fs::read_to_string(&report).unwrap();
+    assert!(text.contains("# GainCraft daily digest"), "{text}");
+    assert!(text.contains("Health changes"), "{text}");
+    let recorded = c.gain.last_sync_run().unwrap().unwrap();
+    assert_eq!(recorded.status, "ok");
+    assert_eq!(
+        (recorded.rows_read, recorded.wrote, recorded.accounts),
+        (30, true, 1)
+    );
+    assert!(recorded.alerts >= 2, "change + renewal: {recorded:?}");
+    // A health-only tick is recorded too and does not duplicate CTAs.
+    let before = c.gain.ctas(None, true).unwrap().len();
+    let again = run(&mut c, "gain_tick", json!({})).unwrap();
+    assert_eq!(again["run"]["source"], "none");
+    assert_eq!(again["run"]["rows_read"], 0);
+    assert_eq!(c.gain.ctas(None, true).unwrap().len(), before);
+}
+
+#[test]
+fn failed_tick_is_recorded_and_writes_nothing() {
+    let mut c = ctx("tick-fail");
+    run(
+        &mut c,
+        "gain_account_add",
+        json!({ "name": "Anna Mockova KG", "domain": "mockova.example", "seats": 8 }),
+    )
+    .unwrap();
+    let p = product_db_days("fail", 3);
+    let err = run(
+        &mut c,
+        "gain_tick",
+        json!({ "path": p.to_string_lossy(), "query": "DELETE FROM events" }),
+    )
+    .unwrap_err();
+    assert!(err.contains("SELECT"), "{err}");
+    let recorded = c.gain.last_sync_run().unwrap().unwrap();
+    assert_eq!(recorded.status, "error");
+    assert!(recorded.error.unwrap().contains("SELECT"));
+    assert_eq!(
+        (recorded.rows_read, recorded.accounts, recorded.alerts),
+        (0, 0, 0)
+    );
+    let a = c.gain.account("mockova.example").unwrap();
+    assert!(c
+        .gain
+        .days(
+            a.id,
+            Local::now().date_naive() - Duration::days(10),
+            Local::now().date_naive()
+        )
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn alerts_filter_by_since_and_name_the_reasons() {
+    let mut c = ctx("alerts");
+    let today = Local::now().date_naive();
+    run(
+        &mut c,
+        "gain_account_add",
+        json!({ "name": "Anna Mockova KG", "domain": "mockova.example", "seats": 8 }),
+    )
+    .unwrap();
+    run(
+        &mut c,
+        "gain_cta_add",
+        json!({ "account": "mockova.example", "title": "Call the owner", "due": today.to_string() }),
+    )
+    .unwrap();
+    let a = c.gain.account("mockova.example").unwrap();
+    let days: Vec<Day> = (0..30)
+        .map(|i| Day {
+            date: today - Duration::days(i),
+            active_users: 6,
+            sessions: 8,
+            key_actions: 20,
+        })
+        .collect();
+    c.gain.upsert_days(a.id, &days).unwrap();
+    c.gain
+        .snapshot(a.id, today - Duration::days(1), 10, "red", "{}")
+        .unwrap();
+    let all = run(&mut c, "gain_alerts", json!({ "since": today.to_string() })).unwrap();
+    assert!(
+        all["new_ctas"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v["title"] == "Call the owner"),
+        "{all}"
+    );
+    assert!(
+        all["changed"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v["from"] == "red"),
+        "{all}"
+    );
+    let tomorrow = (today + Duration::days(1)).to_string();
+    let none = run(&mut c, "gain_alerts", json!({ "since": tomorrow })).unwrap();
+    assert!(none["new_ctas"].as_array().unwrap().is_empty());
+    assert_eq!(none["since"], tomorrow);
+}
+
 #[test]
 fn import_resolves_every_account_before_writing() {
     let mut c = ctx("import");
